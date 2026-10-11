@@ -1,0 +1,16 @@
+[Unit]
+Description=Antigravity CLI Telegram Bot Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/Projects/AntigravityTelegramBot
+ExecStart=%h/Documents/Projects/AntigravityTelegramBot/.venv/bin/python3 %h/Documents/Projects/AntigravityTelegramBot/main.py
+Restart=always
+RestartSec=5s
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,4 @@
+# List of authorized numeric Telegram User IDs, one per line.
+# Only requests from these exact immutable IDs will be accepted.
+# Replace with your actual Telegram User ID (obtain from /id command or @userinfobot)
+123456789
