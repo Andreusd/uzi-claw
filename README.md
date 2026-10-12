@@ -27,6 +27,8 @@ A secure, private Telegram Bot bridge connected directly to your local Antigravi
 │   ├── config.py               # Environment & path configuration
 │   ├── auth.py                 # Authorization check & decorator
 │   ├── antigravity_runner.py   # Subprocess runner for agy CLI streaming
+│   ├── terminal_runner.py      # Subprocess runner for direct shell execution
+│   ├── device_stats.py         # Hardware & system stats (battery, CPU, RAM, disk)
 │   ├── session_manager.py      # Session state & history parser
 │   ├── formatters.py           # Message chunker & rate-limited live updater
 │   └── bot.py                  # Telegram command & message handlers
@@ -104,10 +106,14 @@ systemctl --user restart antigravity-telegram.service
 
 | Command | Description |
 |---|---|
-| *(Any Text)* | Sends the prompt directly to the Antigravity agent |
-| `/status` | Shows conversation ID, working directory, autopilot, and state |
+| *(Any Text)* | Sends the prompt directly to the Antigravity agent (or runs directly in shell if in `/terminal` mode) |
+| `/interrupt` | Interrupts the currently executing prompt or task (equivalent to pressing `Esc` in `agy` CLI or `Ctrl+C` in shell) |
+| `/cancel` | Cancels / stops the currently running agent task or terminal command |
+| `/device` | Checks host device stats: battery percentage, power drain, remaining time, CPU load, RAM, swap, disk, and uptime (aliases: `/battery`, `/stats`) |
+| `/status` | Shows session conversation ID, working directory, autopilot, terminal mode, and state |
+| `/terminal` | Toggles direct terminal mode: executes all commands straight in `bash` without LLM; send `/terminal` or `exit` to return |
+| `/usage` | Displays model quotas and limit remaining (equivalent to `agy /usage`) |
 | `/new` | Resets conversation and starts a fresh session on the next prompt |
-| `/cancel` | Cancels / interrupts the currently running agent task |
 | `/cd <path>` | Changes the agent working directory |
 | `/autopilot <on\|off>` | Toggles auto-approving tool permissions |
 | `/mode <plan\|accept-edits\|clear>` | Sets the agent execution mode |

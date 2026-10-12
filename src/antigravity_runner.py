@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import signal
 from typing import AsyncGenerator, Callable, Awaitable, Optional, Any
 from pathlib import Path
 
@@ -23,6 +24,30 @@ class AntigravityRunner:
     def is_running(self) -> bool:
         """Check if an agy subprocess is actively running."""
         return self._current_process is not None and self._current_process.returncode is None
+
+    async def interrupt(self) -> bool:
+        """Interrupt the active subprocess (equivalent to pressing Esc in agy CLI / sending SIGINT)."""
+        if not self.is_running or self._current_process is None:
+            return False
+
+        self._is_cancelled = True
+        logger.info("Attempting to interrupt running agy process PID %d with SIGINT (Esc)", self._current_process.pid)
+        try:
+            self._current_process.send_signal(signal.SIGINT)
+            for _ in range(6):
+                if self._current_process.returncode is not None:
+                    break
+                await asyncio.sleep(0.5)
+
+            if self._current_process.returncode is None:
+                logger.warning("Force terminating agy process PID %d after SIGINT timeout", self._current_process.pid)
+                self._current_process.terminate()
+            return True
+        except ProcessLookupError:
+            return True
+        except Exception as e:
+            logger.error("Error interrupting agy process: %s", e)
+            return False
 
     async def cancel(self) -> bool:
         """Cancel the active subprocess if running."""
@@ -228,3 +253,50 @@ class AntigravityRunner:
             }
         finally:
             self._current_process = None
+
+
+async def get_usage(bin_path: str = AGY_BIN_PATH) -> tuple[Optional[dict], Optional[str]]:
+    """
+    Fetch usage and quota limits from Antigravity CLI using `agy --output-format=stream-json -p=/usage`.
+
+    Returns:
+        (usage_data_dict, raw_response_str)
+    """
+    cmd = [bin_path, "--output-format=stream-json", "-p=/usage"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+
+        usage_data = None
+        raw_response = ""
+
+        for line in stdout.decode(errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+                if payload.get("event") == "command_result":
+                    cmd_info = payload.get("command", {})
+                    if cmd_info.get("name") == "usage":
+                        usage_data = cmd_info.get("data")
+                elif payload.get("event") == "result":
+                    res = payload.get("result", {})
+                    if res.get("response"):
+                        raw_response = res.get("response").strip()
+            except json.JSONDecodeError:
+                pass
+
+        if not usage_data and not raw_response and stdout:
+            # Fallback if output format wasn't stream-json
+            raw_response = stdout.decode(errors="replace").strip()
+
+        return usage_data, raw_response
+    except Exception as e:
+        logger.error("Failed to fetch usage from agy: %s", e)
+        return None, None
+

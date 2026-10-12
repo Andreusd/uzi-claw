@@ -15,7 +15,16 @@ from telegram.ext import (
 from .config import TELEGRAM_TOKEN, AGY_BIN_PATH, INJECT_TELEGRAM_CONTEXT, MEDIA_DIR
 from .auth import restricted, load_authorized_users
 from .session_manager import session_manager
-from .formatters import split_message, safe_reply, RateLimitedMessageUpdater
+from .formatters import (
+    split_message,
+    safe_reply,
+    safe_edit,
+    format_usage_data,
+    format_terminal_output,
+    RateLimitedMessageUpdater,
+)
+from .antigravity_runner import get_usage
+from .device_stats import format_device_stats
 
 logger = logging.getLogger(__name__)
 
@@ -134,13 +143,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Send me any message, photo, voice note, or prompt, and I will forward it to `agy`.\n\n"
         "🛠 **Available Commands:**\n"
         "• `/status` - Check current session, directory & settings\n"
+        "• `/device` - Device stats & battery level (or `/battery`)\n"
+        "• `/terminal` - Toggle direct terminal mode (shell commands, no LLM)\n"
+        "• `/interrupt` - Interrupt active prompt (Esc in agy CLI)\n"
+        "• `/cancel` - Stop / cancel currently running turn\n"
+        "• `/usage` - View model quotas & limits remaining\n"
         "• `/new` - Start a fresh conversation turn\n"
         "• `/recent` - View recent CLI conversations to resume\n"
         "• `/resume <id|number>` - Resume a past conversation (e.g. `/resume_1`)\n"
         "• `/cd <path>` - Change working directory\n"
         "• `/autopilot <on|off>` - Toggle tool auto-approvals\n"
         "• `/mode <plan|accept-edits|clear>` - Set agent execution mode\n"
-        "• `/cancel` - Stop / cancel currently running turn\n"
         "• `/help` - Show this help message"
     )
     await safe_reply(msg, text)
@@ -162,8 +175,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user = update.effective_user
     session = session_manager.get_session(update.effective_chat.id)
     cid = session.conversation_id or "*(None - will create new)*"
-    status_emoji = "🟢 Running" if session.runner.is_running else "⚪ Idle"
+
+    if session.terminal_runner.is_running:
+        status_emoji = "🟢 Running (terminal)"
+    elif session.runner.is_running:
+        status_emoji = "🟢 Running (agent)"
+    else:
+        status_emoji = "⚪ Idle"
+
     autopilot_str = "Enabled (`--dangerously-skip-permissions`)" if session.autopilot else "Disabled (safe/ask)"
+    terminal_str = "🟢 Active (shell)" if session.terminal_mode else "⚪ Inactive (LLM mode)"
 
     text = (
         "📊 **Antigravity Session Status**\n\n"
@@ -171,11 +192,47 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"• **Telegram User ID:** `{user.id if user else 'unknown'}`\n"
         f"• **Conversation ID:** `{cid}`\n"
         f"• **Working Directory:** `{session.cwd}`\n"
+        f"• **Terminal Mode:** {terminal_str}\n"
         f"• **Autopilot:** {autopilot_str}\n"
         f"• **Mode:** `{session.mode or 'default'}`\n"
         f"• **CLI Binary:** `{AGY_BIN_PATH}`"
     )
     await safe_reply(msg, text)
+
+
+@restricted
+async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show quota and usage limits equivalent to agy /usage."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    status_msg = await safe_reply(msg, "⏳ Fetching quota usage from `agy`...")
+    try:
+        usage_data, raw_text = await get_usage()
+        if usage_data:
+            formatted = format_usage_data(usage_data)
+        elif raw_text:
+            formatted = f"📊 *Antigravity Quota Usage*\n\n```\n{raw_text}\n```"
+        else:
+            formatted = "❌ Could not retrieve usage quota from `agy`. Please try again."
+
+        if status_msg:
+            edited = await safe_edit(status_msg, formatted)
+            if not edited:
+                await safe_reply(msg, formatted)
+        else:
+            await safe_reply(msg, formatted)
+    except Exception as e:
+        logger.error("Error in cmd_usage: %s", e, exc_info=True)
+        err_msg = f"❌ Error retrieving usage: `{e}`"
+        if status_msg:
+            edited = await safe_edit(status_msg, err_msg)
+            if not edited:
+                await safe_reply(msg, err_msg)
+        else:
+            await safe_reply(msg, err_msg)
+
 
 
 @restricted
@@ -213,15 +270,129 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     session = session_manager.get_session(update.effective_chat.id)
-    if not session.runner.is_running:
-        await safe_reply(msg, "⚪ No task is currently running.")
+
+    if session.terminal_runner.is_running:
+        success = await session.terminal_runner.cancel()
+        if success:
+            await safe_reply(msg, "⏹️ Sent cancellation (SIGTERM) to running terminal command.")
+            return
+
+    if session.runner.is_running:
+        success = await session.runner.cancel()
+        if success:
+            await safe_reply(msg, "⏹️ Sent cancellation request to active agent process.")
+            return
+
+    await safe_reply(msg, "⚪ No task is currently running.")
+
+
+@restricted
+async def cmd_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Interrupt currently executing prompt (equivalent to pressing Esc in agy CLI / sending SIGINT)."""
+    msg = update.effective_message
+    if not msg:
         return
 
-    success = await session.runner.cancel()
-    if success:
-        await safe_reply(msg, "⏹️ Sent cancellation request to active agent process.")
+    session = session_manager.get_session(update.effective_chat.id)
+
+    if session.terminal_runner.is_running:
+        success = await session.terminal_runner.interrupt()
+        if success:
+            await safe_reply(msg, "⏹️ Sent interrupt (Ctrl+C / SIGINT) to running terminal command.")
+            return
+
+    if session.runner.is_running:
+        success = await session.runner.interrupt()
+        if success:
+            await safe_reply(msg, "⏹️ Interrupted active prompt (Esc / SIGINT sent to `agy`).")
+            return
+
+    await safe_reply(msg, "⚪ No task or prompt is currently running.")
+
+
+@restricted
+async def cmd_device(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display host device statistics including battery, CPU, RAM, disk, and uptime."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    stats_text = format_device_stats()
+    await safe_reply(msg, stats_text)
+
+
+# Backward-compatibility alias
+cmd_stats = cmd_device
+
+
+@restricted
+async def cmd_terminal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle or switch direct terminal mode (no LLM)."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    session = session_manager.get_session(update.effective_chat.id)
+
+    if session.runner.is_running:
+        await safe_reply(msg, "⚠️ An agent turn is currently running. Please wait or send /cancel first.")
+        return
+
+    arg = context.args[0].lower() if context.args else None
+    if arg in ("off", "exit", "quit", "disable", "stop"):
+        session.terminal_mode = False
+    elif arg in ("on", "enable", "start"):
+        session.terminal_mode = True
     else:
-        await safe_reply(msg, "⚠️ Could not cancel active process.")
+        # Toggle mode
+        session.terminal_mode = not session.terminal_mode
+
+    if session.terminal_mode:
+        text = (
+            "💻 **Terminal Mode Activated**\n\n"
+            "Every message you send will be executed directly in the shell (`bash`), with **no LLM involved**.\n\n"
+            f"• **Working Directory:** `{session.cwd}`\n"
+            "• **Exit:** Send `/terminal` or `exit` to return to LLM mode."
+        )
+    else:
+        text = "🔙 **Exited Terminal Mode.** Returned to LLM mode."
+
+    await safe_reply(msg, text)
+
+
+async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str) -> None:
+    """Execute a shell command directly and reply with formatted output."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    session = session_manager.get_session(update.effective_chat.id)
+
+    if session.terminal_runner.is_running:
+        await safe_reply(msg, "⏳ A terminal command is currently executing. Send /cancel to stop it.")
+        return
+
+    cmd_preview = command if len(command) <= 50 else command[:47] + "..."
+    status_msg = await safe_reply(msg, f"💻 `$ {cmd_preview}`\n⏳ _Running..._")
+
+    result = await session.terminal_runner.run(command=command, cwd=session.cwd)
+
+    if result.get("new_cwd"):
+        session.cwd = result["new_cwd"]
+
+    chunks = format_terminal_output(command, result)
+    if not chunks:
+        chunks = ["✅ _(No output)_"]
+
+    if status_msg:
+        edited = await safe_edit(status_msg, chunks[0])
+        if not edited:
+            await safe_reply(msg, chunks[0])
+    else:
+        await safe_reply(msg, chunks[0])
+
+    for chunk in chunks[1:]:
+        await safe_reply(msg, chunk)
 
 
 @restricted
@@ -388,6 +559,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     session = session_manager.get_session(update.effective_chat.id)
 
+    # 1. Direct terminal mode (no LLM involved)
+    if session.terminal_mode:
+        # Handle media gracefully
+        if msg.photo or msg.voice or msg.audio or msg.document:
+            await safe_reply(
+                msg,
+                "⚠️ Terminal mode is active. Only shell text commands are supported.\n"
+                "Send `/terminal` to exit and return to LLM mode.",
+            )
+            return
+
+        cmd_text = msg.text.strip() if msg.text else ""
+        if not cmd_text:
+            return
+
+        # Check for explicit exit command
+        if cmd_text.lower() in ("exit", "quit", ":q") or cmd_text.lower().startswith("/terminal"):
+            session.terminal_mode = False
+            await safe_reply(msg, "🔙 **Exited Terminal Mode.** Returned to LLM mode.")
+            return
+
+        await execute_terminal_command(update, context, cmd_text)
+        return
+
     if session.runner.is_running:
         await safe_reply(msg, "⏳ An agent turn is already in progress. Send /cancel to interrupt it.")
         return
@@ -535,12 +730,31 @@ class ResumeCommandHandler(CommandHandler):
         return None
 
 
+@restricted
+async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fallback handler for commands starting with /."""
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+
+    session = session_manager.get_session(update.effective_chat.id)
+    if session.terminal_mode:
+        # Forward direct binary invocations (e.g. /bin/ls) to terminal execution
+        await execute_terminal_command(update, context, msg.text.strip())
+    else:
+        await safe_reply(msg, "❓ Unknown command. Send /help for available commands.")
+
+
 BOT_COMMANDS = [
     BotCommand("status", "Show session status & working directory"),
+    BotCommand("device", "Check device stats (battery, CPU, RAM, disk)"),
+    BotCommand("terminal", "Toggle direct terminal mode (no LLM)"),
+    BotCommand("interrupt", "Interrupt current prompt (Esc in agy CLI)"),
+    BotCommand("cancel", "Cancel currently running turn"),
+    BotCommand("usage", "Show model quotas & limits remaining"),
     BotCommand("new", "Start a fresh conversation turn"),
     BotCommand("recent", "View recent CLI conversations"),
     BotCommand("resume", "Resume a previous conversation (ID or number)"),
-    BotCommand("cancel", "Cancel currently running turn"),
     BotCommand("cd", "Change working directory"),
     BotCommand("autopilot", "Toggle tool auto-approval (on/off)"),
     BotCommand("mode", "Set execution mode (plan/accept-edits/clear)"),
@@ -581,9 +795,15 @@ def create_application() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("device", cmd_device))
+    app.add_handler(CommandHandler("stats", cmd_device))
+    app.add_handler(CommandHandler("battery", cmd_device))
+    app.add_handler(CommandHandler("terminal", cmd_terminal))
+    app.add_handler(CommandHandler("interrupt", cmd_interrupt))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("usage", cmd_usage))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("reset", cmd_new))
-    app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("cd", cmd_cd))
     app.add_handler(CommandHandler("autopilot", cmd_autopilot))
     app.add_handler(CommandHandler("mode", cmd_mode))
@@ -599,6 +819,9 @@ def create_application() -> Application:
         | filters.Document.ALL
     ) & ~filters.COMMAND
     app.add_handler(MessageHandler(media_filters, handle_message))
+
+    # Fallback for commands starting with / (e.g. /bin/ls in terminal mode or unknown commands)
+    app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
 
     # Error handling
     app.add_error_handler(error_handler)

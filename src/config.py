@@ -49,3 +49,4 @@ AUTHORIZED_USERS_FILE = PROJECT_ROOT / "authorized_users.txt"
 # Antigravity CLI history file (for /recent command)
 AGY_HISTORY_FILE = Path.home() / ".gemini" / "antigravity-cli" / "history.jsonl"
 AGY_PRESENCE_DIR = Path.home() / ".gemini" / "antigravity-cli" / "presence"
+AGY_BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"

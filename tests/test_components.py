@@ -42,6 +42,43 @@ class TestBotComponents(unittest.TestCase):
             none_user = None
             self.assertFalse(is_user_authorized(none_user))
 
+    def test_unauthorized_notification(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.auth import restricted, _ALERT_TIMESTAMPS
+
+        _ALERT_TIMESTAMPS.clear()
+
+        async def run_test():
+            handler_mock = AsyncMock()
+            decorated_handler = restricted(handler_mock)
+
+            bot_mock = MagicMock()
+            bot_mock.send_message = AsyncMock()
+            context = MagicMock(bot=bot_mock)
+
+            chat = MagicMock(type="private", id=99999)
+            user = DummyUser(99999, username="stranger", full_name="Stranger Danger")
+            msg = MagicMock(text="Hello bot!", caption=None, photo=None, voice=None, audio=None, document=None, video=None, sticker=None, contact=None, location=None)
+            update = MagicMock(effective_chat=chat, effective_user=user, effective_message=msg)
+
+            with patch("src.auth.load_authorized_users", return_value={"123456789"}):
+                with patch("src.auth.is_user_authorized", return_value=False):
+                    await decorated_handler(update, context)
+
+            # Handler itself should NOT have been executed
+            handler_mock.assert_not_called()
+
+            # send_message should have been called on authorized user chat_id
+            bot_mock.send_message.assert_called_once()
+            call_kwargs = bot_mock.send_message.call_args[1]
+            self.assertEqual(call_kwargs["chat_id"], 123456789)
+            self.assertEqual(call_kwargs["parse_mode"], "HTML")
+            self.assertIn("Stranger Danger", call_kwargs["text"])
+            self.assertIn("99999", call_kwargs["text"])
+            self.assertIn("Hello bot!", call_kwargs["text"])
+
+        asyncio.run(run_test())
+
     def test_message_splitter(self):
         short_text = "Hello world"
         chunks = split_message(short_text, max_length=50)
@@ -164,15 +201,15 @@ class TestBotComponents(unittest.TestCase):
         from src.bot import build_prompt_with_context
         from unittest.mock import patch
 
-        user_with_username = DummyUser(12345, username="Andreusd", full_name="Andreus D")
+        user_with_username = DummyUser(12345, username="TestUser", full_name="Test User")
         res1 = build_prompt_with_context("Check status", user=user_with_username)
-        self.assertIn("[Context: Prompt sent by @Andreusd via Telegram bot.", res1)
+        self.assertIn("[Context: Prompt sent by @TestUser via Telegram bot.", res1)
         self.assertIn("Check status", res1)
 
-        user_no_username = DummyUser(12345, username=None, full_name="Andreus")
-        user_no_username.first_name = "Andreus"
+        user_no_username = DummyUser(12345, username=None, full_name="Alice")
+        user_no_username.first_name = "Alice"
         res2 = build_prompt_with_context("Hello", user=user_no_username)
-        self.assertIn("[Context: Prompt sent by Andreus via Telegram bot.", res2)
+        self.assertIn("[Context: Prompt sent by Alice via Telegram bot.", res2)
         self.assertIn("Hello", res2)
 
         with patch("src.bot.INJECT_TELEGRAM_CONTEXT", False):
@@ -256,6 +293,375 @@ class TestBotComponents(unittest.TestCase):
 
         asyncio.run(run_tests())
 
+    def test_format_usage_data(self):
+        from src.formatters import format_usage_data
+        sample_data = {
+            "groups": [
+                {
+                    "name": "Gemini Models",
+                    "description": "Models within this group: Gemini Flash, Gemini Pro",
+                    "buckets": [
+                        {
+                            "id": "gemini-weekly",
+                            "name": "Weekly Limit Remaining",
+                            "description": "You have used some of your weekly limit, it will fully refresh in 2 days, 8 hours.",
+                            "remaining_fraction": 0.8,
+                            "reset_time": "2026-10-13T23:45:30Z",
+                        },
+                        {
+                            "id": "gemini-5h",
+                            "name": "Five Hour Limit Remaining",
+                            "remaining_fraction": 1.0,
+                        },
+                    ],
+                }
+            ]
+        }
+        formatted = format_usage_data(sample_data)
+        self.assertIn("Antigravity Quota Usage", formatted)
+        self.assertIn("Gemini Models", formatted)
+        self.assertIn("Gemini Flash, Gemini Pro", formatted)
+        self.assertIn("Weekly Limit", formatted)
+        self.assertIn("80%", formatted)
+        self.assertIn("Refreshes in 2 days, 8 hours", formatted)
+        self.assertIn("100%", formatted)
+
+    def test_cmd_usage(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.bot import cmd_usage
+
+        async def run_test():
+            status_msg_mock = MagicMock()
+            status_msg_mock.edit_text = AsyncMock()
+
+            msg_mock = MagicMock()
+            msg_mock.reply_text = AsyncMock(return_value=status_msg_mock)
+
+            chat_mock = MagicMock(type="private", id=123456789)
+            update = MagicMock(effective_message=msg_mock, effective_user=DummyUser(123456789), effective_chat=chat_mock)
+            context = MagicMock()
+
+            sample_usage = {
+                "groups": [
+                    {
+                        "name": "Gemini Models",
+                        "buckets": [
+                            {"name": "Weekly Limit Remaining", "remaining_fraction": 0.9}
+                        ]
+                    }
+                ]
+            }
+
+            with patch("src.auth.is_user_authorized", return_value=True):
+                with patch("src.bot.get_usage", return_value=(sample_usage, None)):
+                    await cmd_usage(update, context)
+
+            msg_mock.reply_text.assert_called_once()
+            status_msg_mock.edit_text.assert_called_once()
+            edited_text = status_msg_mock.edit_text.call_args[0][0]
+            self.assertIn("Antigravity Quota Usage", edited_text)
+            self.assertIn("90%", edited_text)
+
+        asyncio.run(run_test())
+
+    def test_terminal_runner(self):
+        from src.terminal_runner import TerminalRunner
+
+        async def run_test():
+            runner = TerminalRunner()
+            # 1. Normal command
+            res = await runner.run("echo 'hello terminal'", cwd=str(Path.home()))
+            self.assertEqual(res["status"], "SUCCESS")
+            self.assertEqual(res["exit_code"], 0)
+            self.assertEqual(res["output"].strip(), "hello terminal")
+
+            # 2. Command with error
+            res_err = await runner.run("ls /nonexistent_test_directory_404", cwd=str(Path.home()))
+            self.assertEqual(res_err["status"], "ERROR")
+            self.assertNotEqual(res_err["exit_code"], 0)
+            self.assertIn("No such file or directory", res_err["output"])
+
+            # 3. Command with cd
+            res_cd = await runner.run("cd /tmp && pwd", cwd=str(Path.home()))
+            self.assertEqual(res_cd["status"], "SUCCESS")
+            self.assertEqual(res_cd["new_cwd"], "/tmp")
+
+            # 4. Cancel
+            async def run_cancel():
+                task = asyncio.create_task(runner.run("sleep 10", cwd=str(Path.home())))
+                await asyncio.sleep(0.2)
+                self.assertTrue(runner.is_running)
+                cancelled = await runner.cancel()
+                self.assertTrue(cancelled)
+                res_canc = await task
+                self.assertEqual(res_canc["status"], "CANCELLED")
+
+            await run_cancel()
+
+        asyncio.run(run_test())
+
+    def test_format_terminal_output(self):
+        from src.formatters import format_terminal_output
+
+        # 1. Success with output
+        res1 = {"status": "SUCCESS", "exit_code": 0, "output": "hello world", "new_cwd": None}
+        chunks1 = format_terminal_output("echo hello", res1)
+        self.assertEqual(len(chunks1), 1)
+        self.assertIn("$ echo hello", chunks1[0])
+        self.assertIn("```\nhello world\n```", chunks1[0])
+
+        # 2. Success without output (e.g. cd or mkdir)
+        res2 = {"status": "SUCCESS", "exit_code": 0, "output": "", "new_cwd": "/tmp"}
+        chunks2 = format_terminal_output("cd /tmp", res2)
+        self.assertEqual(len(chunks2), 1)
+        self.assertIn("Done (exit code 0)", chunks2[0])
+        self.assertIn("/tmp", chunks2[0])
+
+        # 3. Error with output
+        res3 = {"status": "ERROR", "exit_code": 2, "output": "command not found", "new_cwd": None}
+        chunks3 = format_terminal_output("foobar", res3)
+        self.assertEqual(len(chunks3), 1)
+        self.assertIn("Exit code 2", chunks3[0])
+        self.assertIn("command not found", chunks3[0])
+
+        # 4. Cancelled
+        res4 = {"status": "CANCELLED", "exit_code": None, "output": "", "new_cwd": None}
+        chunks4 = format_terminal_output("sleep 10", res4)
+        self.assertEqual(len(chunks4), 1)
+        self.assertIn("cancelled", chunks4[0].lower())
+
+        # 5. Timeout
+        res5 = {"status": "TIMEOUT", "exit_code": None, "output": "", "new_cwd": None, "timeout": 30}
+        chunks5 = format_terminal_output("sleep 60", res5)
+        self.assertEqual(len(chunks5), 1)
+        self.assertIn("timed out after 30s", chunks5[0])
+
+        # 6. Large output chunking
+        res6 = {"status": "SUCCESS", "exit_code": 0, "output": "A" * 6000, "new_cwd": None}
+        chunks6 = format_terminal_output("large_cmd", res6)
+        self.assertGreater(len(chunks6), 1)
+        for chunk in chunks6:
+            self.assertIn("```", chunk)
+
+    def test_cmd_terminal_and_execution_flow(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.bot import cmd_terminal, handle_message
+
+        async def run_test():
+            chat_id = 987654321
+            user = DummyUser(chat_id)
+            chat = MagicMock(type="private", id=chat_id)
+
+            session = session_manager.get_session(chat_id)
+            session.terminal_mode = False
+
+            status_msg = MagicMock()
+            status_msg.edit_text = AsyncMock()
+
+            msg = MagicMock()
+            msg.reply_text = AsyncMock(return_value=status_msg)
+            msg.text = "/terminal"
+            update = MagicMock(effective_message=msg, effective_user=user, effective_chat=chat)
+            ctx = MagicMock(args=[])
+
+            with patch("src.auth.is_user_authorized", return_value=True):
+                # 1. Toggle ON
+                await cmd_terminal(update, ctx)
+                self.assertTrue(session.terminal_mode)
+                sent = msg.reply_text.call_args[0][0]
+                self.assertIn("Terminal Mode Activated", sent)
+
+                # 2. Run shell command via message
+                msg.reply_text.reset_mock()
+                status_msg.edit_text.reset_mock()
+                msg.text = "echo 'testing terminal mode'"
+                msg.photo = None
+                msg.voice = None
+                msg.audio = None
+                msg.document = None
+
+                await handle_message(update, ctx)
+                self.assertTrue(msg.reply_text.called)
+                self.assertTrue(status_msg.edit_text.called)
+                final_text = status_msg.edit_text.call_args[0][0]
+                self.assertIn("testing terminal mode", final_text)
+
+                # 3. Exit via "exit" text
+                msg.reply_text.reset_mock()
+                msg.text = "exit"
+                await handle_message(update, ctx)
+                self.assertFalse(session.terminal_mode)
+                sent = msg.reply_text.call_args[0][0]
+                self.assertIn("Exited Terminal Mode", sent)
+
+                # 4. Toggle back ON then exit via /terminal
+                ctx.args = ["on"]
+                await cmd_terminal(update, ctx)
+                self.assertTrue(session.terminal_mode)
+
+                ctx.args = []
+                await cmd_terminal(update, ctx)
+                self.assertFalse(session.terminal_mode)
+
+        asyncio.run(run_test())
+
+    def test_device_stats(self):
+        from src.device_stats import (
+            format_device_stats,
+            make_progress_bar,
+            format_bytes,
+            get_battery_info,
+            get_cpu_info,
+            get_memory_info,
+            get_disk_info,
+            get_system_uptime,
+        )
+
+        # Progress bar
+        self.assertEqual(make_progress_bar(0), "░" * 10)
+        self.assertEqual(make_progress_bar(100), "█" * 10)
+        self.assertEqual(len(make_progress_bar(50)), 10)
+
+        # Format bytes
+        self.assertEqual(format_bytes(1024), "1 KB")
+        self.assertEqual(format_bytes(1024 * 1024 * 500), "500 MB")
+        self.assertIn("GB", format_bytes(1024 * 1024 * 1024 * 2))
+
+        # CPU info
+        cpu = get_cpu_info()
+        self.assertIn("cores", cpu)
+        self.assertGreater(cpu["cores"], 0)
+
+        # Memory info
+        mem = get_memory_info()
+        self.assertIn("total_bytes", mem)
+
+        # Disk info
+        disk = get_disk_info("/")
+        self.assertIn("total_bytes", disk)
+
+        # Full formatting
+        output = format_device_stats()
+        self.assertIn("Device & System Stats", output)
+        self.assertIn("CPU Load", output)
+        self.assertIn("RAM", output)
+        self.assertIn("Disk", output)
+
+    def test_cmd_device(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.bot import cmd_device, cmd_stats
+
+        async def run_test():
+            msg = MagicMock()
+            msg.reply_text = AsyncMock()
+            update = MagicMock(effective_message=msg, effective_user=DummyUser(123456789), effective_chat=MagicMock(type="private", id=123456789))
+            ctx = MagicMock()
+
+            with patch("src.auth.is_user_authorized", return_value=True):
+                await cmd_device(update, ctx)
+
+            msg.reply_text.assert_called_once()
+            sent_text = msg.reply_text.call_args[0][0]
+            self.assertIn("Device & System Stats", sent_text)
+            self.assertIs(cmd_stats, cmd_device)
+
+        asyncio.run(run_test())
+
+    def test_cmd_interrupt(self):
+        from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+        from src.bot import cmd_interrupt
+        from src.antigravity_runner import AntigravityRunner
+        from src.terminal_runner import TerminalRunner
+
+        async def run_test():
+            chat_id = 11223344
+            user = DummyUser(chat_id)
+            chat = MagicMock(type="private", id=chat_id)
+            msg = MagicMock()
+            msg.reply_text = AsyncMock()
+            update = MagicMock(effective_message=msg, effective_user=user, effective_chat=chat)
+            ctx = MagicMock()
+
+            session = session_manager.get_session(chat_id)
+
+            with patch("src.auth.is_user_authorized", return_value=True):
+                # 1. Idle session
+                with patch.object(AntigravityRunner, "is_running", new_callable=PropertyMock, return_value=False), \
+                     patch.object(TerminalRunner, "is_running", new_callable=PropertyMock, return_value=False):
+                    await cmd_interrupt(update, ctx)
+                    sent = msg.reply_text.call_args[0][0]
+                    self.assertIn("No task or prompt is currently running", sent)
+
+                # 2. Agent runner running
+                msg.reply_text.reset_mock()
+                with patch.object(AntigravityRunner, "is_running", new_callable=PropertyMock, return_value=True), \
+                     patch.object(session.runner, "interrupt", AsyncMock(return_value=True)), \
+                     patch.object(TerminalRunner, "is_running", new_callable=PropertyMock, return_value=False):
+                    await cmd_interrupt(update, ctx)
+                    session.runner.interrupt.assert_called_once()
+                    sent = msg.reply_text.call_args[0][0]
+                    self.assertIn("Interrupted active prompt", sent)
+
+                # 3. Terminal runner running
+                msg.reply_text.reset_mock()
+                with patch.object(TerminalRunner, "is_running", new_callable=PropertyMock, return_value=True), \
+                     patch.object(session.terminal_runner, "interrupt", AsyncMock(return_value=True)), \
+                     patch.object(AntigravityRunner, "is_running", new_callable=PropertyMock, return_value=False):
+                    await cmd_interrupt(update, ctx)
+                    session.terminal_runner.interrupt.assert_called_once()
+                    sent = msg.reply_text.call_args[0][0]
+                    self.assertIn("Sent interrupt", sent)
+
+        asyncio.run(run_test())
+
+    def test_runner_interrupt_methods(self):
+        from src.antigravity_runner import AntigravityRunner
+        from src.terminal_runner import TerminalRunner
+        from unittest.mock import MagicMock
+        import signal
+
+        async def run_test():
+            # AntigravityRunner interrupt
+            agy_runner = AntigravityRunner()
+            # Idle returns False
+            self.assertFalse(await agy_runner.interrupt())
+
+            mock_proc = MagicMock()
+            mock_proc.returncode = None
+            mock_proc.pid = 9999
+            agy_runner._current_process = mock_proc
+
+            # Once interrupted, simulate process exit
+            def fake_send_signal(sig):
+                self.assertEqual(sig, signal.SIGINT)
+                mock_proc.returncode = 0
+            mock_proc.send_signal = fake_send_signal
+
+            res = await agy_runner.interrupt()
+            self.assertTrue(res)
+            self.assertTrue(agy_runner._is_cancelled)
+
+            # TerminalRunner interrupt
+            term_runner = TerminalRunner()
+            self.assertFalse(await term_runner.interrupt())
+
+            mock_term_proc = MagicMock()
+            mock_term_proc.returncode = None
+            mock_term_proc.pid = 9998
+            term_runner._current_process = mock_term_proc
+
+            def fake_term_send_signal(sig):
+                self.assertEqual(sig, signal.SIGINT)
+                mock_term_proc.returncode = 0
+            mock_term_proc.send_signal = fake_term_send_signal
+
+            term_res = await term_runner.interrupt()
+            self.assertTrue(term_res)
+            self.assertTrue(term_runner._is_cancelled)
+
+        asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()
+
