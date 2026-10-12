@@ -598,16 +598,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not prompt_text:
         return
 
-    # Post initial status message
+    # Post initial status message with retry
     status_msg = await safe_reply(msg, init_status)
     if not status_msg:
-        return
+        await asyncio.sleep(1)
+        status_msg = await safe_reply(msg, init_status)
 
-    updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5)
+    updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
     streaming_text: list[str] = []
     current_tool: str = ""
 
     async def on_event(event_type: str, data: any) -> None:
+        if not updater:
+            return
         nonlocal current_tool
         if event_type == "tool_start":
             tname = data.get("name", "tool")
@@ -649,25 +652,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     error_msg = result.get("error", "")
 
     if status == "CANCELLED":
-        await updater.update("⏹️ Execution was cancelled.", force=True)
+        if updater:
+            await updater.update("⏹️ Execution was cancelled.", force=True)
+        else:
+            await safe_reply(msg, "⏹️ Execution was cancelled.")
         return
 
     if status == "ERROR":
         err_display = f"❌ **Error executing turn:**\n```\n{error_msg}\n```"
-        await updater.update(err_display, force=True)
+        if updater:
+            await updater.update(err_display, force=True)
+        else:
+            await safe_reply(msg, err_display)
         return
 
     if not response_text:
-        await updater.update("⚠️ Turn completed with empty output.", force=True)
+        if updater:
+            await updater.update("⚠️ Turn completed with empty output.", force=True)
+        else:
+            await safe_reply(msg, "⚠️ Turn completed with empty output.")
         return
 
     # Response is available: chunk it and send
     chunks = split_message(response_text)
 
-    # Edit initial message with the first chunk
-    edited = await updater.update(chunks[0], force=True)
+    # Edit initial message with the first chunk, or send as reply if no status_msg
+    edited = False
+    if updater:
+        edited = await updater.update(chunks[0], force=True)
     if not edited:
-        # If edit failed (e.g. formatting or rate limit), send clean reply
         await safe_reply(msg, chunks[0])
 
     # Send any remaining chunks as separate messages
