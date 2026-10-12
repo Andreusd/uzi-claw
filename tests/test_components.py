@@ -566,10 +566,37 @@ class TestBotComponents(unittest.TestCase):
 
             msg.reply_text.assert_called_once()
             sent_text = msg.reply_text.call_args[0][0]
-            self.assertIn("Device & System Stats", sent_text)
+            self.assertIn("System Stats", sent_text)
             self.assertIs(cmd_stats, cmd_device)
 
         asyncio.run(run_test())
+
+    def test_markdown_to_telegram_html(self):
+        from src.formatters import markdown_to_telegram_html, sanitize_and_balance_html
+
+        sample = """# Title
+**Bold text** and *italic text* and ***both***.
+`inline_code`
+* Item 1
+* Item 2
+```python
+x < 10 && y > 20
+```
+---
+"""
+        converted = markdown_to_telegram_html(sample)
+        self.assertIn("<b>Title</b>", converted)
+        self.assertIn("<b>Bold text</b>", converted)
+        self.assertIn("<i>italic text</i>", converted)
+        self.assertIn("<code>inline_code</code>", converted)
+        self.assertIn("• Item 1", converted)
+        self.assertIn('<pre><code class="language-python">x &lt; 10 &amp;&amp; y &gt; 20</code></pre>', converted)
+        self.assertIn("───────────────", converted)
+
+        # Tag balancing
+        unbalanced = "<b>Hello <i>world"
+        balanced = sanitize_and_balance_html(unbalanced)
+        self.assertEqual(balanced, "<b>Hello <i>world</i></b>")
 
     def test_cmd_interrupt(self):
         from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
