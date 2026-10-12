@@ -10,6 +10,7 @@ A secure, private Telegram Bot bridge connected directly to your local Antigravi
 - **Autopilot Toggle**: In-chat `/autopilot on|off` to toggle tool auto-approvals (`--dangerously-skip-permissions`).
 - **Session Controls**: `/new` to reset context, `/cd <path>` to navigate project directories, `/recent` to view and clickable `👉 /resume_1` (or `/resume <id>`) to switch to previous conversations.
 - **Background Daemon & Boot Startup**: Configured as a `systemd` user service with lingering enabled, launching on system boot without requiring an interactive graphical login.
+- **Native Desktop System Tray Indicator**: Clean GNOME/KDE panel status icon (`StatusNotifierItem` + `DBusMenu`) displaying real-time agent/terminal status, active conversation preview, one-click task interrupt, session reset, live terminal logs, and service controls.
 
 ---
 
@@ -21,8 +22,12 @@ A secure, private Telegram Bot bridge connected directly to your local Antigravi
 ├── .env                        # Local configuration & Telegram Token
 ├── authorized_users.txt.example# Template for authorized Telegram user IDs
 ├── requirements.txt            # Python dependencies
-├── main.py                     # Bot entrypoint
+├── main.py                     # Bot entrypoint (starts bot and optional tray)
 ├── antigravity-telegram.service # Systemd service unit definition
+├── icons/                      # Flat monochrome symbolic icons for system tray
+│   ├── telegram-bridge.png     # Idle / online indicator
+│   ├── telegram-bridge-active.png # Running agent turn indicator
+│   └── generate_icons.py       # Cairo icon generator script
 ├── src/
 │   ├── config.py               # Environment & path configuration
 │   ├── auth.py                 # Authorization check & decorator
@@ -31,6 +36,7 @@ A secure, private Telegram Bot bridge connected directly to your local Antigravi
 │   ├── device_stats.py         # Hardware & system stats (battery, CPU, RAM, disk)
 │   ├── session_manager.py      # Session state & history parser
 │   ├── formatters.py           # Message chunker & rate-limited live updater
+│   ├── tray.py                 # StatusNotifierItem & DBusMenu system tray applet
 │   └── bot.py                  # Telegram command & message handlers
 └── .venv/                      # Python virtual environment
 ```

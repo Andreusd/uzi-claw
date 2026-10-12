@@ -9,7 +9,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import TELEGRAM_TOKEN
+from src.config import TELEGRAM_TOKEN, ENABLE_TRAY_ICON
+from src.session_manager import session_manager
+from src.tray import start_tray_in_background
 from src.bot import create_application
 
 
@@ -33,6 +35,10 @@ def main() -> None:
             PROJECT_ROOT,
         )
         sys.exit(1)
+
+    # Initialize Linux desktop system tray icon if enabled
+    if ENABLE_TRAY_ICON and "--no-tray" not in sys.argv:
+        start_tray_in_background(session_manager=session_manager)
 
     logger.info("Starting Antigravity Telegram Bot...")
     app = create_application()

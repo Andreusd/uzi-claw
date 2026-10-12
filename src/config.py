@@ -39,6 +39,9 @@ DEFAULT_EFFORT = os.getenv("DEFAULT_EFFORT", "").strip()
 # Prompt context injection (prepends Telegram origin metadata to prompts)
 INJECT_TELEGRAM_CONTEXT = os.getenv("INJECT_TELEGRAM_CONTEXT", "true").lower() in ("true", "1", "yes")
 
+# System tray icon (StatusNotifierItem on Linux desktop)
+ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "true").lower() in ("true", "1", "yes")
+
 # Media directory for incoming photos and voice notes
 MEDIA_DIR = PROJECT_ROOT / "media"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
