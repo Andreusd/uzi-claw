@@ -643,7 +643,28 @@ x < 10 && y > 20
                     sent = msg.reply_text.call_args[0][0]
                     self.assertIn("Sent interrupt", sent)
 
+                # 4. Session is busy but process not yet launched
+                msg.reply_text.reset_mock()
+                session.is_busy = True
+                session.cancel_requested = False
+                with patch.object(AntigravityRunner, "is_running", new_callable=PropertyMock, return_value=False), \
+                     patch.object(TerminalRunner, "is_running", new_callable=PropertyMock, return_value=False):
+                    await cmd_interrupt(update, ctx)
+                    self.assertTrue(session.cancel_requested)
+                    sent = msg.reply_text.call_args[0][0]
+                    self.assertIn("Interrupted pending prompt before startup", sent)
+                session.is_busy = False
+                session.cancel_requested = False
+
         asyncio.run(run_test())
+
+    def test_create_application_concurrent_updates(self):
+        from unittest.mock import patch
+        from src.bot import create_application
+        with patch("src.bot.TELEGRAM_TOKEN", "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"), \
+             patch("src.bot.load_authorized_users", return_value={"123456"}):
+            app = create_application()
+            self.assertGreater(app.concurrent_updates, 1)
 
     def test_runner_interrupt_methods(self):
         from src.antigravity_runner import AntigravityRunner

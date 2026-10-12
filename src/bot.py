@@ -283,6 +283,11 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await safe_reply(msg, "⏹️ Sent cancellation request to active agent process.")
             return
 
+    if session.is_busy:
+        session.cancel_requested = True
+        await safe_reply(msg, "⏹️ Cancelled pending turn before startup.")
+        return
+
     await safe_reply(msg, "⚪ No task is currently running.")
 
 
@@ -306,6 +311,11 @@ async def cmd_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if success:
             await safe_reply(msg, "⏹️ Interrupted active prompt (Esc / SIGINT sent to `agy`).")
             return
+
+    if session.is_busy:
+        session.cancel_requested = True
+        await safe_reply(msg, "⏹️ Interrupted pending prompt before startup.")
+        return
 
     await safe_reply(msg, "⚪ No task or prompt is currently running.")
 
@@ -368,31 +378,44 @@ async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT
 
     session = session_manager.get_session(update.effective_chat.id)
 
-    if session.terminal_runner.is_running:
-        await safe_reply(msg, "⏳ A terminal command is currently executing. Send /cancel to stop it.")
+    if session.terminal_runner.is_running or session.is_busy:
+        await safe_reply(msg, "⏳ A command is currently executing. Send /interrupt or /cancel to stop it.")
         return
 
-    cmd_preview = command if len(command) <= 50 else command[:47] + "..."
-    status_msg = await safe_reply(msg, f"💻 `$ {cmd_preview}`\n⏳ _Running..._")
+    session.is_busy = True
+    session.cancel_requested = False
+    try:
+        cmd_preview = command if len(command) <= 50 else command[:47] + "..."
+        status_msg = await safe_reply(msg, f"💻 `$ {cmd_preview}`\n⏳ _Running..._")
 
-    result = await session.terminal_runner.run(command=command, cwd=session.cwd)
+        if session.cancel_requested:
+            session.cancel_requested = False
+            if status_msg:
+                await safe_edit(status_msg, "⏹️ Execution cancelled before starting.")
+            else:
+                await safe_reply(msg, "⏹️ Execution cancelled before starting.")
+            return
 
-    if result.get("new_cwd"):
-        session.cwd = result["new_cwd"]
+        result = await session.terminal_runner.run(command=command, cwd=session.cwd)
 
-    chunks = format_terminal_output(command, result)
-    if not chunks:
-        chunks = ["✅ _(No output)_"]
+        if result.get("new_cwd"):
+            session.cwd = result["new_cwd"]
 
-    if status_msg:
-        edited = await safe_edit(status_msg, chunks[0])
-        if not edited:
+        chunks = format_terminal_output(command, result)
+        if not chunks:
+            chunks = ["✅ _(No output)_"]
+
+        if status_msg:
+            edited = await safe_edit(status_msg, chunks[0])
+            if not edited:
+                await safe_reply(msg, chunks[0])
+        else:
             await safe_reply(msg, chunks[0])
-    else:
-        await safe_reply(msg, chunks[0])
 
-    for chunk in chunks[1:]:
-        await safe_reply(msg, chunk)
+        for chunk in chunks[1:]:
+            await safe_reply(msg, chunk)
+    finally:
+        session.is_busy = False
 
 
 @restricted
@@ -583,109 +606,127 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await execute_terminal_command(update, context, cmd_text)
         return
 
-    if session.runner.is_running:
-        await safe_reply(msg, "⏳ An agent turn is already in progress. Send /cancel to interrupt it.")
+    if session.runner.is_running or session.is_busy:
+        await safe_reply(msg, "⏳ An agent turn is already in progress. Send /interrupt or /cancel to stop it.")
         return
 
-    # Extract prompt text and handle media downloads
+    session.is_busy = True
+    session.cancel_requested = False
     try:
-        prompt_text, init_status = await prepare_prompt_from_message(update, context)
-    except Exception as e:
-        logger.error("Failed to process message media: %s", e, exc_info=True)
-        await safe_reply(msg, f"❌ Failed to process attached file: {e}")
-        return
-
-    if not prompt_text:
-        return
-
-    # Post initial status message with retry
-    status_msg = await safe_reply(msg, init_status)
-    if not status_msg:
-        await asyncio.sleep(1)
-        status_msg = await safe_reply(msg, init_status)
-
-    updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
-    streaming_text: list[str] = []
-    current_tool: str = ""
-
-    async def on_event(event_type: str, data: any) -> None:
-        if not updater:
+        # Extract prompt text and handle media downloads
+        try:
+            prompt_text, init_status = await prepare_prompt_from_message(update, context)
+        except Exception as e:
+            logger.error("Failed to process message media: %s", e, exc_info=True)
+            await safe_reply(msg, f"❌ Failed to process attached file: {e}")
             return
-        nonlocal current_tool
-        if event_type == "tool_start":
-            tname = data.get("name", "tool")
-            current_tool = tname
-            await updater.update(f"⚙️ Running tool: `{tname}`...")
-        elif event_type == "tool_done":
-            current_tool = ""
-            await updater.update("🤖 Processing results...")
-        elif event_type == "thought":
-            pass
-        elif event_type == "text_delta":
-            streaming_text.append(data)
-            accumulated = "".join(streaming_text)
-            if len(accumulated) > 10 and not current_tool:
-                # Preview partial text (up to last 1500 chars)
-                preview = accumulated if len(accumulated) < 1500 else "..." + accumulated[-1500:]
-                await updater.update(f"💬 {preview}")
 
-    # Run the prompt with injected Telegram context if enabled (first turn only)
-    is_first_turn = session.conversation_id is None
-    full_prompt = build_prompt_with_context(prompt_text, user=update.effective_user, is_first_turn=is_first_turn)
-    result = await session.runner.run(
-        prompt=full_prompt,
-        conversation_id=session.conversation_id,
-        cwd=session.cwd,
-        autopilot=session.autopilot,
-        mode=session.mode,
-        model=session.model,
-        effort=session.effort,
-        event_callback=on_event,
-    )
+        if not prompt_text:
+            return
 
-    # Update session conversation ID
-    if result.get("conversation_id"):
-        session.conversation_id = result["conversation_id"]
+        if session.cancel_requested:
+            session.cancel_requested = False
+            await safe_reply(msg, "⏹️ Execution cancelled before starting.")
+            return
 
-    status = result.get("status")
-    response_text = result.get("response", "").strip()
-    error_msg = result.get("error", "")
+        # Post initial status message with retry
+        status_msg = await safe_reply(msg, init_status)
+        if not status_msg:
+            await asyncio.sleep(1)
+            status_msg = await safe_reply(msg, init_status)
 
-    if status == "CANCELLED":
+        if session.cancel_requested:
+            session.cancel_requested = False
+            if status_msg:
+                await safe_edit(status_msg, "⏹️ Execution cancelled before starting.")
+            else:
+                await safe_reply(msg, "⏹️ Execution cancelled before starting.")
+            return
+
+        updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
+        streaming_text: list[str] = []
+        current_tool: str = ""
+
+        async def on_event(event_type: str, data: any) -> None:
+            if not updater:
+                return
+            nonlocal current_tool
+            if event_type == "tool_start":
+                tname = data.get("name", "tool")
+                current_tool = tname
+                await updater.update(f"⚙️ Running tool: `{tname}`...")
+            elif event_type == "tool_done":
+                current_tool = ""
+                await updater.update("🤖 Processing results...")
+            elif event_type == "thought":
+                pass
+            elif event_type == "text_delta":
+                streaming_text.append(data)
+                accumulated = "".join(streaming_text)
+                if len(accumulated) > 10 and not current_tool:
+                    # Preview partial text (up to last 1500 chars)
+                    preview = accumulated if len(accumulated) < 1500 else "..." + accumulated[-1500:]
+                    await updater.update(f"💬 {preview}")
+
+        # Run the prompt with injected Telegram context if enabled (first turn only)
+        is_first_turn = session.conversation_id is None
+        full_prompt = build_prompt_with_context(prompt_text, user=update.effective_user, is_first_turn=is_first_turn)
+        result = await session.runner.run(
+            prompt=full_prompt,
+            conversation_id=session.conversation_id,
+            cwd=session.cwd,
+            autopilot=session.autopilot,
+            mode=session.mode,
+            model=session.model,
+            effort=session.effort,
+            event_callback=on_event,
+        )
+
+        # Update session conversation ID
+        if result.get("conversation_id"):
+            session.conversation_id = result["conversation_id"]
+
+        status = result.get("status")
+        response_text = result.get("response", "").strip()
+        error_msg = result.get("error", "")
+
+        if status == "CANCELLED":
+            if updater:
+                await updater.update("⏹️ Execution was cancelled.", force=True)
+            else:
+                await safe_reply(msg, "⏹️ Execution was cancelled.")
+            return
+
+        if status == "ERROR":
+            err_display = f"❌ **Error executing turn:**\n```\n{error_msg}\n```"
+            if updater:
+                await updater.update(err_display, force=True)
+            else:
+                await safe_reply(msg, err_display)
+            return
+
+        if not response_text:
+            if updater:
+                await updater.update("⚠️ Turn completed with empty output.", force=True)
+            else:
+                await safe_reply(msg, "⚠️ Turn completed with empty output.")
+            return
+
+        # Response is available: chunk it and send
+        chunks = split_message(response_text)
+
+        # Edit initial message with the first chunk, or send as reply if no status_msg
+        edited = False
         if updater:
-            await updater.update("⏹️ Execution was cancelled.", force=True)
-        else:
-            await safe_reply(msg, "⏹️ Execution was cancelled.")
-        return
+            edited = await updater.update(chunks[0], force=True)
+        if not edited:
+            await safe_reply(msg, chunks[0])
 
-    if status == "ERROR":
-        err_display = f"❌ **Error executing turn:**\n```\n{error_msg}\n```"
-        if updater:
-            await updater.update(err_display, force=True)
-        else:
-            await safe_reply(msg, err_display)
-        return
-
-    if not response_text:
-        if updater:
-            await updater.update("⚠️ Turn completed with empty output.", force=True)
-        else:
-            await safe_reply(msg, "⚠️ Turn completed with empty output.")
-        return
-
-    # Response is available: chunk it and send
-    chunks = split_message(response_text)
-
-    # Edit initial message with the first chunk, or send as reply if no status_msg
-    edited = False
-    if updater:
-        edited = await updater.update(chunks[0], force=True)
-    if not edited:
-        await safe_reply(msg, chunks[0])
-
-    # Send any remaining chunks as separate messages
-    for chunk in chunks[1:]:
-        await safe_reply(msg, chunk)
+        # Send any remaining chunks as separate messages
+        for chunk in chunks[1:]:
+            await safe_reply(msg, chunk)
+    finally:
+        session.is_busy = False
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -802,7 +843,13 @@ def create_application() -> Application:
 
     load_authorized_users()
 
-    app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .concurrent_updates(True)
+        .post_init(post_init)
+        .build()
+    )
 
     # Commands
     app.add_handler(CommandHandler("id", cmd_id))

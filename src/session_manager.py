@@ -39,11 +39,14 @@ class SessionState:
     terminal_mode: bool = False
     terminal_runner: TerminalRunner = field(default_factory=TerminalRunner)
     recent_conversations: list[str] = field(default_factory=list)
+    is_busy: bool = False
+    cancel_requested: bool = False
 
     def reset_conversation(self) -> None:
         """Reset conversation to start a new chat turn on next message."""
         self.conversation_id = None
         self.terminal_mode = False
+        self.cancel_requested = False
 
 
 class SessionManager:
