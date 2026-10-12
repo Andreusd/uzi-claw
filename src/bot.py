@@ -29,9 +29,9 @@ from .device_stats import format_device_stats
 logger = logging.getLogger(__name__)
 
 
-def build_prompt_with_context(prompt_text: str, user=None) -> str:
-    """Optionally inject context so the CLI agent knows the prompt is coming from Telegram."""
-    if not INJECT_TELEGRAM_CONTEXT:
+def build_prompt_with_context(prompt_text: str, user=None, is_first_turn: bool = True) -> str:
+    """Optionally inject context so the CLI agent knows the prompt is coming from Telegram (first turn only)."""
+    if not INJECT_TELEGRAM_CONTEXT or not is_first_turn:
         return prompt_text
 
     user_identifier = f"@{user.username}" if (user and getattr(user, "username", None)) else (getattr(user, "first_name", None) or "User")
@@ -626,8 +626,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 preview = accumulated if len(accumulated) < 1500 else "..." + accumulated[-1500:]
                 await updater.update(f"💬 {preview}")
 
-    # Run the prompt with injected Telegram context if enabled
-    full_prompt = build_prompt_with_context(prompt_text, user=update.effective_user)
+    # Run the prompt with injected Telegram context if enabled (first turn only)
+    is_first_turn = session.conversation_id is None
+    full_prompt = build_prompt_with_context(prompt_text, user=update.effective_user, is_first_turn=is_first_turn)
     result = await session.runner.run(
         prompt=full_prompt,
         conversation_id=session.conversation_id,

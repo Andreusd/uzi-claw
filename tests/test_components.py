@@ -216,6 +216,10 @@ class TestBotComponents(unittest.TestCase):
             res_disabled = build_prompt_with_context("Check status", user=user_with_username)
             self.assertEqual(res_disabled, "Check status")
 
+        # Test subsequent turn (is_first_turn=False) does not inject context
+        res_subsequent = build_prompt_with_context("Check status", user=user_with_username, is_first_turn=False)
+        self.assertEqual(res_subsequent, "Check status")
+
     def test_prepare_prompt_from_message(self):
         from unittest.mock import AsyncMock, MagicMock
         from src.bot import prepare_prompt_from_message
