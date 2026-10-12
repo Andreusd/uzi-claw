@@ -16,7 +16,7 @@ A secure, private Telegram Bot bridge connected directly to your local Antigravi
 ## Directory Structure
 
 ```text
-~/Documents/Projects/AntigravityTelegramBot/
+~/Documents/Projects/AntigravityTelegramBridge/
 ├── .env.example                # Template for configuration
 ├── .env                        # Local configuration & Telegram Token
 ├── authorized_users.txt.example# Template for authorized Telegram user IDs
@@ -44,7 +44,7 @@ A secure, private Telegram Bot bridge connected directly to your local Antigravi
 Obtain a token from [@BotFather](https://t.me/botfather) and add it to `.env`:
 
 ```bash
-# In ~/Documents/Projects/AntigravityTelegramBot/.env:
+# In ~/Documents/Projects/AntigravityTelegramBridge/.env:
 TELEGRAM_TOKEN=123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ
 ```
 
@@ -70,7 +70,7 @@ cp authorized_users.txt.example authorized_users.txt
 ### Manual Execution (for testing):
 
 ```bash
-cd ~/Documents/Projects/AntigravityTelegramBot
+cd ~/Documents/Projects/AntigravityTelegramBridge
 ./.venv/bin/python3 main.py
 ```
 

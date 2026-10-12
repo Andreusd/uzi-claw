@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Documents/Projects/AntigravityTelegramBot
-ExecStart=%h/Documents/Projects/AntigravityTelegramBot/.venv/bin/python3 %h/Documents/Projects/AntigravityTelegramBot/main.py
+WorkingDirectory=%h/Documents/Projects/AntigravityTelegramBridge
+ExecStart=%h/Documents/Projects/AntigravityTelegramBridge/.venv/bin/python3 %h/Documents/Projects/AntigravityTelegramBridge/main.py
 Restart=always
 RestartSec=5s
 Environment=PYTHONUNBUFFERED=1
