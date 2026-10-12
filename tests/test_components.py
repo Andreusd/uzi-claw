@@ -666,6 +666,44 @@ x < 10 && y > 20
             app = create_application()
             self.assertGreater(app.concurrent_updates, 1)
 
+    def test_download_telegram_file_with_retry(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from telegram.error import TimedOut
+        from src.bot import download_telegram_file_with_retry
+        import tempfile
+
+        async def run_test():
+            bot = MagicMock()
+            file_mock = MagicMock()
+            file_mock.download_to_drive = AsyncMock()
+
+            # 1. Success on attempt 2 after initial timeout
+            attempts = 0
+            async def fake_get_file(file_id, **kwargs):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise TimedOut("Timed out on first attempt")
+                return file_mock
+
+            bot.get_file = AsyncMock(side_effect=fake_get_file)
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                target_path = Path(tmpdir) / "test_voice.ogg"
+                result = await download_telegram_file_with_retry(bot, "file_123", target_path, max_retries=2)
+                self.assertEqual(result, target_path)
+                self.assertEqual(attempts, 2)
+                file_mock.download_to_drive.assert_called_once()
+
+            # 2. Complete failure raises TimedOut
+            bot.get_file = AsyncMock(side_effect=TimedOut("Persistent timeout"))
+            with tempfile.TemporaryDirectory() as tmpdir:
+                target_path = Path(tmpdir) / "test_voice.ogg"
+                with self.assertRaises(TimedOut):
+                    await download_telegram_file_with_retry(bot, "file_456", target_path, max_retries=2)
+
+        asyncio.run(run_test())
+
     def test_runner_interrupt_methods(self):
         from src.antigravity_runner import AntigravityRunner
         from src.terminal_runner import TerminalRunner

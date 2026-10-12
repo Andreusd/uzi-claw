@@ -3,7 +3,10 @@
 import asyncio
 import logging
 from pathlib import Path
+from typing import Optional
 from telegram import Update, BotCommand, BotCommandScopeChat, MessageEntity
+from telegram.error import TimedOut, RetryAfter, NetworkError
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -44,6 +47,42 @@ def build_prompt_with_context(prompt_text: str, user=None, is_first_turn: bool =
     return f"{context_prefix}{prompt_text}"
 
 
+async def download_telegram_file_with_retry(
+    bot,
+    file_id: str,
+    local_path: Path,
+    max_retries: int = 3,
+    timeout: float = 60.0,
+) -> Path:
+    """
+    Download a Telegram media file with retries, exponential backoff, and extended timeouts.
+    Handles network blips, TimedOut, and RetryAfter exceptions.
+    """
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    last_err: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info("Downloading media file %s (attempt %d/%d)...", file_id, attempt, max_retries)
+            file_obj = await bot.get_file(file_id, read_timeout=timeout, connect_timeout=15.0)
+            await file_obj.download_to_drive(str(local_path), read_timeout=timeout, connect_timeout=15.0)
+            logger.info("Successfully downloaded media to %s", local_path)
+            return local_path
+        except RetryAfter as e:
+            last_err = e
+            logger.warning("Telegram RetryAfter %ss on file download attempt %d/%d", e.retry_after, attempt, max_retries)
+            await asyncio.sleep(e.retry_after)
+        except (TimedOut, NetworkError, Exception) as e:
+            last_err = e
+            logger.warning("Media download attempt %d/%d failed: %s", attempt, max_retries, e)
+            if attempt < max_retries:
+                await asyncio.sleep(attempt * 1.5)
+
+    if last_err:
+        raise last_err
+    raise RuntimeError("Media download failed after retries")
+
+
 async def prepare_prompt_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
     """
     Extract prompt text and handle media downloads (photos, voice notes, audio, documents).
@@ -56,10 +95,9 @@ async def prepare_prompt_from_message(update: Update, context: ContextTypes.DEFA
     # 1. Voice Message (.ogg Opus)
     if msg.voice:
         file_id = msg.voice.file_id
-        file_obj = await context.bot.get_file(file_id)
         filename = f"voice_{msg.message_id}_{file_id[:8]}.ogg"
         local_path = MEDIA_DIR / filename
-        await file_obj.download_to_drive(str(local_path))
+        await download_telegram_file_with_retry(context.bot, file_id, local_path)
         caption = msg.caption.strip() if msg.caption else ""
         caption_part = f"\nUser's note: {caption}" if caption else ""
         prompt_text = (
@@ -72,10 +110,9 @@ async def prepare_prompt_from_message(update: Update, context: ContextTypes.DEFA
     if msg.photo:
         photo = msg.photo[-1]  # Highest resolution
         file_id = photo.file_id
-        file_obj = await context.bot.get_file(file_id)
         filename = f"photo_{msg.message_id}_{file_id[:8]}.jpg"
         local_path = MEDIA_DIR / filename
-        await file_obj.download_to_drive(str(local_path))
+        await download_telegram_file_with_retry(context.bot, file_id, local_path)
         caption = msg.caption.strip() if msg.caption else ""
         user_request = caption if caption else "Please inspect the attached image and assist me with it."
         prompt_text = (
@@ -87,11 +124,10 @@ async def prepare_prompt_from_message(update: Update, context: ContextTypes.DEFA
     # 3. Audio file (MP3, WAV, etc.)
     if msg.audio:
         file_id = msg.audio.file_id
-        file_obj = await context.bot.get_file(file_id)
         orig_ext = Path(msg.audio.file_name).suffix if msg.audio.file_name else ".mp3"
         filename = f"audio_{msg.message_id}_{file_id[:8]}{orig_ext}"
         local_path = MEDIA_DIR / filename
-        await file_obj.download_to_drive(str(local_path))
+        await download_telegram_file_with_retry(context.bot, file_id, local_path)
         caption = msg.caption.strip() if msg.caption else ""
         caption_part = f"\nUser's note: {caption}" if caption else ""
         prompt_text = (
@@ -103,12 +139,11 @@ async def prepare_prompt_from_message(update: Update, context: ContextTypes.DEFA
     # 4. Document (e.g. image or other file sent uncompressed)
     if msg.document:
         file_id = msg.document.file_id
-        file_obj = await context.bot.get_file(file_id)
         orig_name = msg.document.file_name or "file"
         safe_name = "".join(c for c in orig_name if c.isalnum() or c in "._- ")
         filename = f"doc_{msg.message_id}_{safe_name}"
         local_path = MEDIA_DIR / filename
-        await file_obj.download_to_drive(str(local_path))
+        await download_telegram_file_with_retry(context.bot, file_id, local_path)
         caption = msg.caption.strip() if msg.caption else ""
         user_request = caption if caption else f"Please inspect the attached file ({orig_name})."
         prompt_text = (
@@ -843,9 +878,18 @@ def create_application() -> Application:
 
     load_authorized_users()
 
+    request_cfg = HTTPXRequest(
+        connection_pool_size=256,
+        connect_timeout=15.0,
+        read_timeout=30.0,
+        write_timeout=20.0,
+        media_write_timeout=60.0,
+    )
+
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
+        .request(request_cfg)
         .concurrent_updates(True)
         .post_init(post_init)
         .build()
