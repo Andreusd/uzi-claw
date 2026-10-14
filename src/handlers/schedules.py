@@ -88,6 +88,7 @@ async def cmd_cancel_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE
     store = _get_schedule_store()
     sched_id = int(raw_arg)
     chat_id = update.effective_chat.id
+    await scheduler_service.cancel_running_job(sched_id)
     success = store.cancel_schedule(sched_id, chat_id=chat_id)
     if success:
         await safe_reply(msg, f"✅ Agendamento **#{sched_id}** cancelado com sucesso.")
@@ -215,6 +216,7 @@ async def handle_schedule_callback(update: Update, context: ContextTypes.DEFAULT
         sched_id_str = data.split(":", 1)[1]
         if sched_id_str.isdigit():
             sched_id = int(sched_id_str)
+            await scheduler_service.cancel_running_job(sched_id)
             success = store.cancel_schedule(sched_id, chat_id=chat_id)
             if success:
                 if query.message:

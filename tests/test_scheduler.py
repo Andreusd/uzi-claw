@@ -194,7 +194,12 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
         mock_session.mode = None
         mock_session.model = None
         mock_session.effort = None
-        mock_session.runner.run = AsyncMock(return_value={"status": "SUCCESS", "response": "Torrent added"})
+        mock_session.runner.run = AsyncMock()
+
+        mock_isolated_runner = MagicMock()
+        mock_isolated_runner.run = AsyncMock(return_value={"status": "SUCCESS", "response": "Torrent added"})
+        mock_isolated_runner.is_running = False
+        service.create_runner = MagicMock(return_value=mock_isolated_runner)
 
         mock_session_manager = MagicMock()
         mock_session_manager.get_session.return_value = mock_session
@@ -204,7 +209,10 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
 
         await service.execute_job(job)
 
-        mock_session.runner.run.assert_called_once()
+        # Isolated runner was used, session.runner was NEVER touched
+        mock_isolated_runner.run.assert_called_once()
+        mock_session.runner.run.assert_not_called()
+
         # Verify initial status message was sent with parse_mode='HTML'
         mock_bot.send_message.assert_called_once()
         self.assertEqual(mock_bot.send_message.call_args[1].get("parse_mode"), "HTML")
@@ -219,7 +227,7 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(updated.last_run)
 
     async def test_scheduler_service_execute_job_with_markdown_and_underscores(self):
-        """Verify markdown with underscores and code blocks is properly converted to HTML."""
+        """Verify markdown with underscores and code blocks is properly converted to HTML using isolated runner."""
         job = self.store.add_schedule(
             chat_id=999,
             prompt="Download episode",
@@ -239,11 +247,16 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
         mock_session.mode = None
         mock_session.model = None
         mock_session.effort = None
+        mock_session.runner.run = AsyncMock()
+
+        mock_isolated_runner = MagicMock()
         # Response with characters that would crash raw Telegram Markdown
-        mock_session.runner.run = AsyncMock(return_value={
+        mock_isolated_runner.run = AsyncMock(return_value={
             "status": "SUCCESS",
             "response": "Downloaded file: `dexter_s01e01_1080p.mkv` in /path_with_underscores/.\n**Result**: Done!",
         })
+        mock_isolated_runner.is_running = False
+        service.create_runner = MagicMock(return_value=mock_isolated_runner)
 
         mock_session_manager = MagicMock()
         mock_session_manager.get_session.return_value = mock_session
@@ -253,6 +266,9 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
 
         await service.execute_job(job)
 
+        mock_isolated_runner.run.assert_called_once()
+        mock_session.runner.run.assert_not_called()
+
         mock_status_msg.edit_text.assert_called_once()
         edit_kwargs = mock_status_msg.edit_text.call_args[1]
         self.assertEqual(edit_kwargs.get("parse_mode"), "HTML")
@@ -260,6 +276,24 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
         # Should be valid HTML: <code> tags instead of raw markdown backticks, <b> for bold
         self.assertIn("<code>dexter_s01e01_1080p.mkv</code>", edited_text)
         self.assertIn("<b>Result</b>", edited_text)
+
+    async def test_scheduler_service_cancel_running_job(self):
+        """Verify cancel_running_job cancels the active runner and cleans up tracking."""
+        service = SchedulerService(store=self.store, check_interval=1)
+        mock_runner = MagicMock()
+        mock_runner.is_running = True
+        mock_runner.cancel = AsyncMock(return_value=True)
+
+        service._active_runners[42] = mock_runner
+
+        # Cancel existing job
+        res = await service.cancel_running_job(42)
+        self.assertTrue(res)
+        mock_runner.cancel.assert_called_once()
+
+        # Non-existent job
+        res_nonexistent = await service.cancel_running_job(999)
+        self.assertFalse(res_nonexistent)
 
 
 if __name__ == "__main__":

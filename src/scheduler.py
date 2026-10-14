@@ -15,6 +15,7 @@ from croniter import croniter
 
 from .config import SCHEDULES_DB_PATH, SCHEDULE_CHECK_INTERVAL, INJECT_TELEGRAM_CONTEXT
 from .formatters import split_message, safe_reply, safe_send, safe_edit, RateLimitedMessageUpdater, LiveStatusTracker
+from .antigravity_runner import AntigravityRunner
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +382,19 @@ class SchedulerService:
         self._task: Optional[asyncio.Task] = None
         self._bot = None
         self._session_manager = None
+        self._active_runners: Dict[int, AntigravityRunner] = {}
+
+    def create_runner(self) -> AntigravityRunner:
+        """Create a dedicated AntigravityRunner instance for background task isolation."""
+        return AntigravityRunner()
+
+    async def cancel_running_job(self, schedule_id: int) -> bool:
+        """Cancel an in-flight background job runner if currently executing."""
+        runner = self._active_runners.get(schedule_id)
+        if runner and runner.is_running:
+            logger.info("Cancelling active background runner for schedule #%d", schedule_id)
+            return await runner.cancel()
+        return False
 
     def start(self, bot, session_manager) -> None:
         """Start the background scheduler task."""
@@ -402,6 +416,15 @@ class SchedulerService:
             except asyncio.CancelledError:
                 pass
             self._task = None
+
+        # Terminate any running background jobs
+        for runner in list(self._active_runners.values()):
+            if runner.is_running:
+                try:
+                    await runner.cancel()
+                except Exception:
+                    pass
+        self._active_runners.clear()
         logger.info("SchedulerService stopped.")
 
     async def _run_loop(self) -> None:
@@ -429,8 +452,8 @@ class SchedulerService:
             # Run job in background task to not block checking others
             asyncio.create_task(self.execute_job(job))
 
-    async def execute_job(self, job: Schedule, is_manual: bool = False) -> None:
-        """Execute a single scheduled job."""
+    async def execute_job(self, job: Schedule, is_manual: bool = False, runner: Optional[AntigravityRunner] = None) -> None:
+        """Execute a single scheduled job using an isolated runner, without locking user session."""
         logger.info("Executing scheduled job #%d (%s): %s", job.id, job.human_desc, job.prompt)
 
         # 1. Update schedule state immediately to avoid double firing
@@ -448,82 +471,86 @@ class SchedulerService:
         session = self._session_manager.get_session(job.chat_id)
         tag = "[Manual Trigger]" if is_manual else "[Agendado]"
 
-        # 2. Acquire session lock and execute via runner
-        async with session.lock:
-            session.is_busy = True
-            cwd = job.target_cwd or session.cwd
+        # Read environment settings from session without locking or mutating session.runner/is_busy
+        cwd = job.target_cwd or (session.cwd if session else None)
+        mode = session.mode if session else None
+        model = session.model if session else None
+        effort = session.effort if session else None
 
-            # Notify Telegram that the scheduled task actually started
-            status_text = f"⏰ *{tag} Tarefa #{job.id} Iniciada:*\n_{job.human_desc or job.prompt}_\n\n⏳ Executando..."
-            status_msg = await safe_send(
-                self._bot,
-                chat_id=job.chat_id,
-                text=status_text,
-                parse_mode="HTML",
+        job_runner = runner or self.create_runner()
+        self._active_runners[job.id] = job_runner
+
+        # Notify Telegram that the scheduled task actually started
+        status_text = f"⏰ *{tag} Tarefa #{job.id} Iniciada:*\n_{job.human_desc or job.prompt}_\n\n⏳ Executando..."
+        status_msg = await safe_send(
+            self._bot,
+            chat_id=job.chat_id,
+            text=status_text,
+            parse_mode="HTML",
+        )
+
+        # Context injection
+        full_prompt = (
+            f"[Context: Scheduled Task #{job.id} triggered automatically via UziClaw Scheduler. "
+            f"Description: {job.human_desc}. "
+            f"Please execute the requested action and report concise results to the user.]\n\n"
+            f"{job.prompt}"
+        )
+
+        updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
+        tracker = LiveStatusTracker(
+            updater,
+            header=f"⏰ *{tag} Tarefa #{job.id}:*\n_{job.human_desc or job.prompt}_\n",
+        ) if updater else None
+
+        async def on_event(event_type: str, data: Any) -> None:
+            if tracker:
+                await tracker.on_event(event_type, data)
+
+        try:
+            # Run using the isolated background runner (zero interference with interactive chat)
+            result = await job_runner.run(
+                prompt=full_prompt,
+                conversation_id=None,
+                cwd=cwd,
+                autopilot=True,
+                mode=mode,
+                model=model,
+                effort=effort,
+                event_callback=on_event,
             )
 
-            # Context injection
-            full_prompt = (
-                f"[Context: Scheduled Task #{job.id} triggered automatically via UziClaw Scheduler. "
-                f"Description: {job.human_desc}. "
-                f"Please execute the requested action and report concise results to the user.]\n\n"
-                f"{job.prompt}"
-            )
+            response_text = result.get("response", "").strip()
+            status = result.get("status", "SUCCESS")
+            error_msg = result.get("error")
 
-            updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
-            tracker = LiveStatusTracker(
-                updater,
-                header=f"⏰ *{tag} Tarefa #{job.id}:*\n_{job.human_desc or job.prompt}_\n",
-            ) if updater else None
+            if status == "SUCCESS":
+                completion_header = f"✅ *[Tarefa #{job.id} Concluída]*\n\n"
+                final_text = completion_header + (response_text or "Operação finalizada com sucesso.")
+            elif status == "CANCELLED":
+                final_text = f"⏹️ *[Tarefa #{job.id}]* Execução cancelada."
+            else:
+                final_text = f"❌ *[Tarefa #{job.id} Falhou]*: {error_msg or 'Erro desconhecido.'}"
 
-            async def on_event(event_type: str, data: Any) -> None:
-                if tracker:
-                    await tracker.on_event(event_type, data)
+            # Send final result
+            chunks = split_message(final_text)
+            if status_msg and chunks:
+                await safe_edit(status_msg, chunks[0], parse_mode="HTML")
+                for chunk in chunks[1:]:
+                    await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="HTML")
+            else:
+                for chunk in chunks:
+                    await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="HTML")
 
-            try:
-                # Use a fresh turn for scheduled runs
-                result = await session.runner.run(
-                    prompt=full_prompt,
-                    conversation_id=None,
-                    cwd=cwd,
-                    autopilot=True,
-                    mode=session.mode,
-                    model=session.model,
-                    effort=session.effort,
-                    event_callback=on_event,
-                )
-
-                response_text = result.get("response", "").strip()
-                status = result.get("status", "SUCCESS")
-                error_msg = result.get("error")
-
-                if status == "SUCCESS":
-                    completion_header = f"✅ *[Tarefa #{job.id} Concluída]*\n\n"
-                    final_text = completion_header + (response_text or "Operação finalizada com sucesso.")
-                elif status == "CANCELLED":
-                    final_text = f"⏹️ *[Tarefa #{job.id}]* Execução cancelada."
-                else:
-                    final_text = f"❌ *[Tarefa #{job.id} Falhou]*: {error_msg or 'Erro desconhecido.'}"
-
-                # Send final result
-                chunks = split_message(final_text)
-                if status_msg and chunks:
-                    await safe_edit(status_msg, chunks[0], parse_mode="HTML")
-                    for chunk in chunks[1:]:
-                        await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="HTML")
-                else:
-                    for chunk in chunks:
-                        await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="HTML")
-
-            except Exception as e:
-                logger.error("Exception during scheduled task execution #%d: %s", job.id, e, exc_info=True)
-                err_text = f"❌ *[Tarefa #{job.id} Erro]*: `{e}`"
-                if status_msg:
-                    await safe_edit(status_msg, err_text, parse_mode="HTML")
-                else:
-                    await safe_send(self._bot, chat_id=job.chat_id, text=err_text, parse_mode="HTML")
-            finally:
-                session.is_busy = False
+        except Exception as e:
+            logger.error("Exception during scheduled task execution #%d: %s", job.id, e, exc_info=True)
+            err_text = f"❌ *[Tarefa #{job.id} Erro]*: `{e}`"
+            if status_msg:
+                await safe_edit(status_msg, err_text, parse_mode="HTML")
+            else:
+                await safe_send(self._bot, chat_id=job.chat_id, text=err_text, parse_mode="HTML")
+        finally:
+            self._active_runners.pop(job.id, None)
 
 
 scheduler_service = SchedulerService()
