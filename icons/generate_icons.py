@@ -12,9 +12,13 @@ def draw_crab(filename: str, badge_color=None):
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 24, 24)
     ctx = cairo.Context(surface)
 
-    fg = (1.0, 1.0, 1.0, 0.95)
-    dark_stroke = (0.1, 0.1, 0.1, 0.45)
-    shade = (0.0, 0.0, 0.0, 0.22)
+    # Authentic vibrant crab color palette
+    crab_main = (0.92, 0.28, 0.10, 1.0)       # Vibrant coral red
+    crab_highlight = (1.0, 0.44, 0.22, 1.0)  # Lighter dorsal highlight
+    crab_dark = (0.65, 0.14, 0.04, 1.0)       # Shadow / joint deep red
+    outline = (0.20, 0.05, 0.02, 0.88)        # Clean dark perimeter definition
+    white = (0.98, 0.98, 0.98, 1.0)           # Eye sclera
+    pupil = (0.12, 0.12, 0.12, 0.95)          # Dark pupil
 
     ctx.set_line_cap(cairo.LINE_CAP_ROUND)
     ctx.set_line_join(cairo.LINE_JOIN_ROUND)
@@ -32,17 +36,17 @@ def draw_crab(filename: str, badge_color=None):
     ]
 
     # Outer outline of legs
-    ctx.set_line_width(2.6)
-    ctx.set_source_rgba(*dark_stroke)
+    ctx.set_line_width(2.8)
+    ctx.set_source_rgba(*outline)
     for p1, p2, p3 in legs:
         ctx.move_to(*p1)
         ctx.line_to(*p2)
         ctx.line_to(*p3)
         ctx.stroke()
 
-    # White core of legs
+    # Vibrant crab red core of legs
     ctx.set_line_width(1.6)
-    ctx.set_source_rgba(*fg)
+    ctx.set_source_rgba(*crab_main)
     for p1, p2, p3 in legs:
         ctx.move_to(*p1)
         ctx.line_to(*p2)
@@ -55,16 +59,16 @@ def draw_crab(filename: str, badge_color=None):
         [(16.0, 13.0), (18.5, 10.5), (19.2, 7.5)],
     ]
     # Arm outlines
-    ctx.set_line_width(3.2)
-    ctx.set_source_rgba(*dark_stroke)
+    ctx.set_line_width(3.4)
+    ctx.set_source_rgba(*outline)
     for p1, p2, p3 in arms:
         ctx.move_to(*p1)
         ctx.curve_to(p2[0], p2[1], p2[0], p2[1], p3[0], p3[1])
         ctx.stroke()
 
-    # Arm white core
+    # Arm red core
     ctx.set_line_width(2.0)
-    ctx.set_source_rgba(*fg)
+    ctx.set_source_rgba(*crab_main)
     for p1, p2, p3 in arms:
         ctx.move_to(*p1)
         ctx.curve_to(p2[0], p2[1], p2[0], p2[1], p3[0], p3[1])
@@ -93,19 +97,25 @@ def draw_crab(filename: str, badge_color=None):
         ctx.curve_to(3.8, -1.5, 2.5, 1.2, 0, 1.5)
         ctx.close_path()
 
-        ctx.set_source_rgba(*fg)
+        # Shaded gradient fill for pincers
+        pat = cairo.LinearGradient(0, -6, 0, 2)
+        pat.add_color_stop_rgba(0.0, *crab_highlight)
+        pat.add_color_stop_rgba(0.55, *crab_main)
+        pat.add_color_stop_rgba(1.0, *crab_dark)
+        ctx.set_source(pat)
         ctx.fill_preserve()
+
         ctx.set_line_width(0.7)
-        ctx.set_source_rgba(*dark_stroke)
+        ctx.set_source_rgba(*outline)
         ctx.stroke()
 
-        # Inner pincer shading
+        # Inner pincer depth crease
         ctx.new_path()
         ctx.move_to(0, 1.0)
         ctx.curve_to(1.8, 0.5, 2.2, -1.8, 1.2, -3.5)
         ctx.curve_to(0.8, -1.5, 0.0, -0.5, 0, 1.0)
         ctx.close_path()
-        ctx.set_source_rgba(*shade)
+        ctx.set_source_rgba(*crab_dark)
         ctx.fill()
 
         ctx.restore()
@@ -115,8 +125,8 @@ def draw_crab(filename: str, badge_color=None):
 
     # 4. Eyestalks & Eyes
     # Stalks
-    ctx.set_line_width(2.0)
-    ctx.set_source_rgba(*dark_stroke)
+    ctx.set_line_width(2.2)
+    ctx.set_source_rgba(*outline)
     ctx.move_to(9.5, 11.5)
     ctx.line_to(9.2, 8.5)
     ctx.stroke()
@@ -124,8 +134,8 @@ def draw_crab(filename: str, badge_color=None):
     ctx.line_to(14.8, 8.5)
     ctx.stroke()
 
-    ctx.set_line_width(1.2)
-    ctx.set_source_rgba(*fg)
+    ctx.set_line_width(1.3)
+    ctx.set_source_rgba(*crab_main)
     ctx.move_to(9.5, 11.5)
     ctx.line_to(9.2, 8.5)
     ctx.stroke()
@@ -134,45 +144,46 @@ def draw_crab(filename: str, badge_color=None):
     ctx.stroke()
 
     # Eye whites
-    ctx.arc(9.2, 7.8, 1.6, 0, 2 * math.pi)
-    ctx.set_source_rgba(*fg)
-    ctx.fill_preserve()
-    ctx.set_line_width(0.6)
-    ctx.set_source_rgba(*dark_stroke)
-    ctx.stroke()
+    for ex, ey in [(9.2, 7.8), (14.8, 7.8)]:
+        ctx.arc(ex, ey, 1.7, 0, 2 * math.pi)
+        ctx.set_source_rgba(*white)
+        ctx.fill_preserve()
+        ctx.set_line_width(0.6)
+        ctx.set_source_rgba(*outline)
+        ctx.stroke()
 
-    ctx.arc(14.8, 7.8, 1.6, 0, 2 * math.pi)
-    ctx.set_source_rgba(*fg)
-    ctx.fill_preserve()
-    ctx.set_line_width(0.6)
-    ctx.set_source_rgba(*dark_stroke)
-    ctx.stroke()
-
-    # Eye pupils
-    ctx.arc(9.5, 7.8, 0.7, 0, 2 * math.pi)
-    ctx.set_source_rgba(0.1, 0.1, 0.1, 0.85)
-    ctx.fill()
-
-    ctx.arc(14.5, 7.8, 0.7, 0, 2 * math.pi)
-    ctx.set_source_rgba(0.1, 0.1, 0.1, 0.85)
-    ctx.fill()
+    # Eye pupils + glint
+    for px, py in [(9.4, 7.8), (14.6, 7.8)]:
+        ctx.arc(px, py, 0.75, 0, 2 * math.pi)
+        ctx.set_source_rgba(*pupil)
+        ctx.fill()
+        # Tiny white reflection glint
+        ctx.arc(px - 0.25, py - 0.25, 0.25, 0, 2 * math.pi)
+        ctx.set_source_rgba(1.0, 1.0, 1.0, 0.9)
+        ctx.fill()
 
     # 5. Carapace (Body)
     ctx.save()
     ctx.translate(12.0, 14.5)
-    ctx.scale(5.2, 3.8)
+    ctx.scale(5.3, 3.8)
     ctx.arc(0, 0, 1.0, 0, 2 * math.pi)
     ctx.restore()
-    ctx.set_source_rgba(*fg)
+
+    carapace_pat = cairo.RadialGradient(12.0, 13.0, 0.5, 12.0, 14.5, 5.0)
+    carapace_pat.add_color_stop_rgba(0.0, *crab_highlight)
+    carapace_pat.add_color_stop_rgba(0.7, *crab_main)
+    carapace_pat.add_color_stop_rgba(1.0, *crab_dark)
+    ctx.set_source(carapace_pat)
     ctx.fill_preserve()
+
     ctx.set_line_width(0.7)
-    ctx.set_source_rgba(*dark_stroke)
+    ctx.set_source_rgba(*outline)
     ctx.stroke()
 
     # Carapace subtle smile groove
     ctx.arc(12.0, 14.0, 2.5, 0.35 * math.pi, 0.65 * math.pi)
     ctx.set_line_width(0.8)
-    ctx.set_source_rgba(*shade)
+    ctx.set_source_rgba(*crab_dark)
     ctx.stroke()
 
     # 6. Badge (if active or error)
