@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Any
 from telegram import Message
 from telegram.error import BadRequest, RetryAfter
 
@@ -224,7 +224,12 @@ def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> List[str]
     return chunks
 
 
-async def safe_reply(msg: Message, text: str, parse_mode: Optional[str] = "HTML") -> Optional[Message]:
+async def safe_reply(
+    msg: Message,
+    text: str,
+    parse_mode: Optional[str] = "HTML",
+    reply_markup: Optional[Any] = None,
+) -> Optional[Message]:
     """Send reply text, automatically converting Markdown to Telegram HTML and falling back to plain text."""
     if not text:
         return None
@@ -233,15 +238,15 @@ async def safe_reply(msg: Message, text: str, parse_mode: Optional[str] = "HTML"
             formatted_text = markdown_to_telegram_html(text)
             if len(formatted_text) > 4000:
                 formatted_text = sanitize_and_balance_html(formatted_text[:3980] + "...")
-            return await msg.reply_text(formatted_text, parse_mode="HTML")
+            return await msg.reply_text(formatted_text, parse_mode="HTML", reply_markup=reply_markup)
         else:
-            return await msg.reply_text(text, parse_mode=parse_mode)
+            return await msg.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
     except BadRequest as e:
         err_str = str(e).lower()
         if "can't parse entities" in err_str or "tag" in err_str or "formatting" in err_str or "entity" in err_str:
             logger.debug("Formatting parse failed (%s), falling back to plain text", e)
             plain_text = text if len(text) <= 4000 else text[:3980] + "..."
-            return await msg.reply_text(plain_text, parse_mode=None)
+            return await msg.reply_text(plain_text, parse_mode=None, reply_markup=reply_markup)
         logger.warning("BadRequest replying to message: %s", e)
         return None
     except Exception as e:
@@ -249,7 +254,52 @@ async def safe_reply(msg: Message, text: str, parse_mode: Optional[str] = "HTML"
         return None
 
 
-async def safe_edit(msg: Message, text: str, parse_mode: Optional[str] = "HTML") -> bool:
+async def safe_send(
+    bot: Any,
+    chat_id: int,
+    text: str,
+    thread_id: Optional[int] = None,
+    parse_mode: Optional[str] = "HTML",
+    reply_markup: Optional[Any] = None,
+) -> Optional[Message]:
+    """Send message to a chat and optional thread, converting Markdown to HTML and falling back to plain text."""
+    if not text:
+        return None
+    try:
+        kwargs = {"chat_id": chat_id, "reply_markup": reply_markup}
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+
+        if parse_mode in ("HTML", "Markdown"):
+            formatted_text = markdown_to_telegram_html(text)
+            if len(formatted_text) > 4000:
+                formatted_text = sanitize_and_balance_html(formatted_text[:3980] + "...")
+            return await bot.send_message(**kwargs, text=formatted_text, parse_mode="HTML")
+        else:
+            send_text = text if len(text) <= 4000 else text[:3980] + "..."
+            return await bot.send_message(**kwargs, text=send_text, parse_mode=parse_mode)
+    except BadRequest as e:
+        err_str = str(e).lower()
+        if "can't parse entities" in err_str or "tag" in err_str or "formatting" in err_str or "entity" in err_str:
+            logger.debug("Formatting parse failed on safe_send (%s), falling back to plain text", e)
+            plain_text = text if len(text) <= 4000 else text[:3980] + "..."
+            kwargs = {"chat_id": chat_id, "reply_markup": reply_markup}
+            if thread_id is not None:
+                kwargs["message_thread_id"] = thread_id
+            return await bot.send_message(**kwargs, text=plain_text, parse_mode=None)
+        logger.warning("BadRequest sending message via safe_send: %s", e)
+        return None
+    except Exception as e:
+        logger.error("Failed to safe_send message: %s", e)
+        return None
+
+
+async def safe_edit(
+    msg: Message,
+    text: str,
+    parse_mode: Optional[str] = "HTML",
+    reply_markup: Optional[Any] = None,
+) -> bool:
     """Edit message text, automatically converting Markdown to Telegram HTML and falling back to plain text."""
     try:
         if parse_mode in ("HTML", "Markdown"):
@@ -260,11 +310,11 @@ async def safe_edit(msg: Message, text: str, parse_mode: Optional[str] = "HTML")
                 else formatted_text[: TELEGRAM_MAX_LENGTH - 10] + "..."
             )
             edit_text = sanitize_and_balance_html(edit_text)
-            await msg.edit_text(edit_text, parse_mode="HTML")
+            await msg.edit_text(edit_text, parse_mode="HTML", reply_markup=reply_markup)
             return True
         else:
             edit_text = text if len(text) <= TELEGRAM_MAX_LENGTH else text[:TELEGRAM_MAX_LENGTH - 10] + "..."
-            await msg.edit_text(edit_text, parse_mode=parse_mode)
+            await msg.edit_text(edit_text, parse_mode=parse_mode, reply_markup=reply_markup)
             return True
     except BadRequest as e:
         err_str = str(e).lower()
@@ -274,7 +324,7 @@ async def safe_edit(msg: Message, text: str, parse_mode: Optional[str] = "HTML")
             logger.debug("Formatting parse failed on edit (%s), falling back to plain text", e)
             try:
                 plain_text = text if len(text) <= TELEGRAM_MAX_LENGTH else text[:TELEGRAM_MAX_LENGTH - 10] + "..."
-                await msg.edit_text(plain_text, parse_mode=None)
+                await msg.edit_text(plain_text, parse_mode=None, reply_markup=reply_markup)
                 return True
             except Exception:
                 return False

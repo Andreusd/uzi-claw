@@ -208,16 +208,23 @@ class AntigravityRunner:
             await self._current_process.wait()
             await stderr_task
 
-            if self._is_cancelled:
+            retcode = self._current_process.returncode
+            stderr_joined = "\n".join(stderr_lines).strip()
+            is_interrupted = (
+                retcode in (-signal.SIGINT, -signal.SIGTERM, 130, 143)
+                or "interrupted" in stderr_joined.lower()
+            )
+
+            if self._is_cancelled or is_interrupted:
                 return {
                     "conversation_id": captured_conversation_id,
-                    "response": "".join(full_text_stream) or "Execution cancelled by user.",
+                    "response": "".join(full_text_stream) or "⏹️ Execução cancelada ou interrompida.",
                     "status": "CANCELLED",
                     "error": None,
                 }
 
-            if self._current_process.returncode != 0 and not final_response:
-                error_msg = "\n".join(stderr_lines) or f"Process exited with code {self._current_process.returncode}"
+            if retcode != 0 and not final_response:
+                error_msg = stderr_joined or f"Process exited with code {retcode}"
                 return {
                     "conversation_id": captured_conversation_id,
                     "response": "",

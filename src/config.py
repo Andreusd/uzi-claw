@@ -53,3 +53,16 @@ AUTHORIZED_USERS_FILE = PROJECT_ROOT / "authorized_users.txt"
 AGY_HISTORY_FILE = Path.home() / ".gemini" / "antigravity-cli" / "history.jsonl"
 AGY_PRESENCE_DIR = Path.home() / ".gemini" / "antigravity-cli" / "presence"
 AGY_BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+
+# Scheduled tasks persistence database
+SCHEDULES_DB_PATH = PROJECT_ROOT / "data" / "schedules.db"
+SCHEDULE_CHECK_INTERVAL = int(os.getenv("SCHEDULE_CHECK_INTERVAL", "30"))
+SESSIONS_DB_PATH = PROJECT_ROOT / "data" / "sessions.db"
+
+# Forum Supergroup Chat ID for topic isolation
+_forum_id_str = os.getenv("FORUM_GROUP_ID", "").strip()
+try:
+    FORUM_GROUP_ID: Optional[int] = int(_forum_id_str) if _forum_id_str else None
+except ValueError:
+    FORUM_GROUP_ID = None
+

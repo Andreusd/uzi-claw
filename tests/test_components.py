@@ -945,6 +945,72 @@ x < 10 && y > 20
 
         asyncio.run(run_test())
 
+    def test_cmd_new_while_running_detaches_to_background(self):
+        """Test that calling /new while a turn is running detaches it to background and clears conversation_id immediately."""
+        from src.bot import cmd_new
+        from src.session_manager import session_manager
+        from unittest.mock import MagicMock, AsyncMock, patch
+
+        session = session_manager.get_session(7771)
+        session.conversation_id = "running-conv-id"
+        session.is_busy = True
+
+        msg = MagicMock()
+        msg.reply_text = AsyncMock()
+        msg.message_thread_id = None
+        user = DummyUser(7771, username="testuser")
+        chat = MagicMock(id=7771, type="private")
+        update = MagicMock(effective_message=msg, effective_user=user, effective_chat=chat)
+        ctx = MagicMock()
+
+        with patch("src.auth.is_user_authorized", return_value=True):
+            asyncio.run(cmd_new(update, ctx))
+
+        # Session should be detached with fresh conversation_id None and not busy
+        self.assertIsNone(session.conversation_id)
+        self.assertFalse(session.is_busy)
+        reply_call = msg.reply_text.call_args[0][0]
+        self.assertIn("Nova conversa iniciada", reply_call)
+        self.assertIn("segundo plano", reply_call)
+
+    def test_forum_topics_session_isolation(self):
+        """Test that different message_thread_ids in the same group or chat get isolated sessions."""
+        from src.session_manager import session_manager
+
+        s_topic1 = session_manager.get_session(9999, thread_id=101)
+        s_topic2 = session_manager.get_session(9999, thread_id=202)
+        s_main = session_manager.get_session(9999, thread_id=None)
+
+        self.assertNotEqual(s_topic1, s_topic2)
+        self.assertNotEqual(s_topic1, s_main)
+
+        s_topic1.conversation_id = "conv-101"
+        s_topic2.conversation_id = "conv-202"
+
+        self.assertEqual(session_manager.get_session(9999, thread_id=101).conversation_id, "conv-101")
+        self.assertEqual(session_manager.get_session(9999, thread_id=202).conversation_id, "conv-202")
+
+    def test_antigravity_runner_interrupted_handled_as_cancelled(self):
+        """Test that a SIGINT/SIGTERM or 'error: interrupted' in runner returns CANCELLED."""
+        from src.antigravity_runner import AntigravityRunner
+        from unittest.mock import AsyncMock, patch, MagicMock
+
+        runner = AntigravityRunner()
+
+        async def run_test():
+            fake_proc = MagicMock()
+            fake_proc.returncode = 130  # Bash SIGINT code
+            fake_proc.stdout.readline = AsyncMock(side_effect=[b"", b""])
+            fake_proc.stderr.readline = AsyncMock(side_effect=[b"error: interrupted\n", b""])
+            fake_proc.wait = AsyncMock(return_value=130)
+
+            with patch("asyncio.create_subprocess_exec", return_value=fake_proc):
+                res = await runner.run("test prompt")
+                self.assertEqual(res["status"], "CANCELLED")
+                self.assertIn("interrompida", res["response"])
+
+        asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()

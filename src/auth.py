@@ -134,26 +134,45 @@ async def notify_unauthorized_access(update: Update, context: ContextTypes.DEFAU
             logger.error("Failed to send unauthorized alert to admin %s: %s", admin_chat_id, e)
 
 
-def load_authorized_users() -> set[str]:
-    """Load authorized usernames/ids strictly from authorized_users.txt."""
-    users = set()
+_LAST_LOADED_MTIME: float = 0.0
 
-    if AUTHORIZED_USERS_FILE.exists():
-        try:
-            with AUTHORIZED_USERS_FILE.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    users.add(line.lstrip("@"))
-        except Exception as e:
-            logger.error("Failed to read %s: %s", AUTHORIZED_USERS_FILE, e)
-    else:
+
+def load_authorized_users(force: bool = False) -> set[str]:
+    """Load authorized usernames/ids strictly from authorized_users.txt with mtime caching."""
+    global _AUTHORIZED_USERS, _LAST_LOADED_MTIME
+
+    if not AUTHORIZED_USERS_FILE.exists():
         logger.warning("Authorized users file not found: %s", AUTHORIZED_USERS_FILE)
+        return _AUTHORIZED_USERS
+
+    try:
+        current_mtime = AUTHORIZED_USERS_FILE.stat().st_mtime
+    except Exception:
+        current_mtime = 0.0
+
+    if not force and current_mtime == _LAST_LOADED_MTIME and _AUTHORIZED_USERS:
+        return _AUTHORIZED_USERS
+
+    users = set()
+    try:
+        with AUTHORIZED_USERS_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                users.add(line.lstrip("@"))
+    except Exception as e:
+        logger.error("Failed to read %s: %s", AUTHORIZED_USERS_FILE, e)
 
     _AUTHORIZED_USERS.clear()
     _AUTHORIZED_USERS.update(users)
-    logger.info("Loaded %d authorized user identifier(s) from %s: %s", len(_AUTHORIZED_USERS), AUTHORIZED_USERS_FILE.name, _AUTHORIZED_USERS)
+    _LAST_LOADED_MTIME = current_mtime
+    logger.debug(
+        "Loaded %d authorized user identifier(s) from %s: %s",
+        len(_AUTHORIZED_USERS),
+        AUTHORIZED_USERS_FILE.name,
+        _AUTHORIZED_USERS,
+    )
     return _AUTHORIZED_USERS
 
 
@@ -162,33 +181,26 @@ def is_user_authorized(user) -> bool:
     if not user:
         return False
 
-    # Always reload to reflect changes in authorized_users.txt immediately
     load_authorized_users()
 
     user_id_str = str(user.id)
     username = (user.username or "").lstrip("@")
 
-    logger.info("User auth check: id=%s username=%s", user_id_str, username)
+    authorized_list = _AUTHORIZED_USERS
+    authorized_lower = {u.lower() for u in authorized_list}
 
-    # Check numeric ID or username
-    authorized_lower = {u.lower() for u in _AUTHORIZED_USERS}
-
-    if user_id_str in _AUTHORIZED_USERS:
-        return True
-    if username and username.lower() in authorized_lower:
-        return True
-
-    return False
+    is_auth = user_id_str in authorized_list or (username and username.lower() in authorized_lower)
+    logger.debug("User auth check: id=%s username=%s authorized=%s", user_id_str, username, is_auth)
+    return is_auth
 
 
 def restricted(func):
-    """Decorator to restrict handler execution to authorized users in private chats only."""
+    """Decorator to restrict handler execution to authorized users (supports private DMs and forum topics)."""
     @functools.wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        # Enforce private DM chat only (ignore groups and channels completely)
         chat = update.effective_chat
-        if not chat or chat.type != "private":
-            logger.warning("Interaction dropped from non-private chat: type=%s", getattr(chat, 'type', None))
+        if not chat or chat.type not in ("private", "group", "supergroup"):
+            logger.warning("Interaction dropped from unsupported chat type: %s", getattr(chat, 'type', None))
             return
 
         user = update.effective_user

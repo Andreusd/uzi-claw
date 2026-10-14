@@ -5,3 +5,6 @@ __pycache__/
 *.log
 media/
 authorized_users.txt
+data/
+*.db
+*.sqlite

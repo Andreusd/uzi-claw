@@ -6,10 +6,12 @@ import re
 import fcntl
 import json
 import logging
+import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 from .config import (
     DEFAULT_WORKSPACE,
@@ -20,6 +22,7 @@ from .config import (
     AGY_HISTORY_FILE,
     AGY_PRESENCE_DIR,
     AGY_BRAIN_DIR,
+    SESSIONS_DB_PATH,
 )
 from .antigravity_runner import AntigravityRunner
 from .terminal_runner import TerminalRunner
@@ -30,6 +33,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SessionState:
     chat_id: int
+    thread_id: Optional[int] = None
+    forum_topic_id: Optional[int] = None
     conversation_id: Optional[str] = None
     cwd: str = DEFAULT_WORKSPACE
     autopilot: bool = AUTOPILOT_DEFAULT
@@ -44,6 +49,7 @@ class SessionState:
     cancel_requested: bool = False
     queued_count: int = 0
     queue_generation: int = 0
+    background_runners: list[AntigravityRunner] = field(default_factory=list)
     _lock: Optional[asyncio.Lock] = field(default=None, repr=False)
     _loop: Optional[object] = field(default=None, repr=False)
 
@@ -67,22 +73,167 @@ class SessionState:
     def reset_conversation(self) -> None:
         """Reset conversation to start a new chat turn on next message."""
         self.conversation_id = None
+        self.forum_topic_id = None
         self.terminal_mode = False
         self.cancel_requested = False
         self.queue_generation += 1
 
+    def detach_running_turn(self) -> AntigravityRunner:
+        """
+        Detach the currently running turn into a background runner,
+        allocating a brand new runner, lock, and fresh state for the session.
+        Returns the detached runner so it can finish in background.
+        """
+        detached = self.runner
+        if detached.is_running:
+            self.background_runners.append(detached)
+
+        # Allocate fresh runner & lock for the user's new conversation
+        self.runner = AntigravityRunner(bin_path=self.runner.bin_path)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        self._lock = asyncio.Lock()
+        self._loop = loop
+
+        # Reset session properties for fresh conversation
+        self.conversation_id = None
+        self.forum_topic_id = None
+        self.terminal_mode = False
+        self.is_busy = False
+        self.cancel_requested = False
+        self.queued_count = 0
+        self.queue_generation += 1
+        return detached
+
 
 class SessionManager:
-    """Manages user and chat sessions."""
+    """Manages user and chat sessions with SQLite persistence and topic isolation."""
 
-    def __init__(self):
-        self._sessions: Dict[int, SessionState] = {}
+    def __init__(self, db_path: Path = SESSIONS_DB_PATH):
+        self.db_path = db_path
+        self._sessions: Dict[str, SessionState] = {}
+        self._ensure_db()
 
-    def get_session(self, chat_id: int) -> SessionState:
-        """Retrieve or create session state for a given chat ID."""
-        if chat_id not in self._sessions:
-            self._sessions[chat_id] = SessionState(chat_id=chat_id)
-        return self._sessions[chat_id]
+    def _ensure_db(self) -> None:
+        """Create sessions table in SQLite if not existing, with migrations."""
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self.db_path)
+            try:
+                with conn:
+                    conn.execute("""
+                        CREATE TABLE IF NOT EXISTS sessions (
+                            session_key TEXT PRIMARY KEY,
+                            chat_id INTEGER NOT NULL,
+                            thread_id INTEGER,
+                            conversation_id TEXT,
+                            cwd TEXT NOT NULL,
+                            autopilot INTEGER NOT NULL,
+                            mode TEXT,
+                            model TEXT,
+                            effort TEXT,
+                            updated_at REAL NOT NULL,
+                            forum_topic_id INTEGER
+                        );
+                    """)
+                    # Migration check in case table exists without forum_topic_id
+                    cursor = conn.cursor()
+                    cursor.execute("PRAGMA table_info(sessions)")
+                    cols = [r[1] for r in cursor.fetchall()]
+                    if "forum_topic_id" not in cols:
+                        conn.execute("ALTER TABLE sessions ADD COLUMN forum_topic_id INTEGER;")
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error("Failed to initialize sessions database: %s", e)
+
+    def _session_key(self, chat_id: int, thread_id: Optional[int] = None) -> str:
+        return f"{chat_id}:{thread_id or 0}"
+
+    def save_session(self, session: SessionState) -> None:
+        """Persist session state to SQLite."""
+        try:
+            key = self._session_key(session.chat_id, session.thread_id)
+            conn = sqlite3.connect(self.db_path)
+            try:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO sessions (
+                            session_key, chat_id, thread_id, conversation_id,
+                            cwd, autopilot, mode, model, effort, updated_at, forum_topic_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(session_key) DO UPDATE SET
+                            conversation_id=excluded.conversation_id,
+                            cwd=excluded.cwd,
+                            autopilot=excluded.autopilot,
+                            mode=excluded.mode,
+                            model=excluded.model,
+                            effort=excluded.effort,
+                            updated_at=excluded.updated_at,
+                            forum_topic_id=excluded.forum_topic_id
+                        """,
+                        (
+                            key,
+                            session.chat_id,
+                            session.thread_id,
+                            session.conversation_id,
+                            session.cwd,
+                            1 if session.autopilot else 0,
+                            session.mode,
+                            session.model,
+                            session.effort,
+                            time.time(),
+                            int(session.forum_topic_id) if isinstance(session.forum_topic_id, (int, float)) else None,
+                        ),
+                    )
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error("Failed to save session state to DB: %s", e)
+
+    def _load_session(self, chat_id: int, thread_id: Optional[int] = None) -> Optional[SessionState]:
+        """Load session state from SQLite if exists."""
+        try:
+            key = self._session_key(chat_id, thread_id)
+            conn = sqlite3.connect(self.db_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT conversation_id, cwd, autopilot, mode, model, effort, forum_topic_id FROM sessions WHERE session_key = ?",
+                    (key,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return SessionState(
+                        chat_id=chat_id,
+                        thread_id=thread_id,
+                        conversation_id=row[0],
+                        cwd=row[1] or DEFAULT_WORKSPACE,
+                        autopilot=bool(row[2]),
+                        mode=row[3] or None,
+                        model=row[4] or None,
+                        effort=row[5] or None,
+                        forum_topic_id=row[6] if len(row) > 6 else None,
+                    )
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error("Failed to load session state from DB: %s", e)
+        return None
+
+    def get_session(self, chat_id: int, thread_id: Optional[int] = None) -> SessionState:
+        """Retrieve or create session state for a given chat ID and optional thread ID."""
+        key = self._session_key(chat_id, thread_id)
+        if key not in self._sessions:
+            loaded = self._load_session(chat_id, thread_id)
+            if loaded:
+                self._sessions[key] = loaded
+            else:
+                self._sessions[key] = SessionState(chat_id=chat_id, thread_id=thread_id)
+        return self._sessions[key]
 
     def list_recent_conversations(self, limit: int = 8) -> list[dict]:
         """

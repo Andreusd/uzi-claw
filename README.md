@@ -5,6 +5,7 @@ A secure, private Telegram Bot bridge connected directly to your local Antigravi
 ## Features
 
 - **Strict User Authorization & Stealth Mode**: Whitelist verification ensures only your approved Telegram numeric user ID can communicate with the bot. Anyone not in the allowlist is completely and silently ignored—no replies, error messages, or reaction—making the bot appear dead to unauthorized users.
+- **Forum Topics & 1:1 Conversation Isolation**: Dedicated forum topic per conversation in Telegram forum supergroups. Messages sent to the General topic automatically create a dedicated new topic and reply strictly inside that new topic (never spamming General). Messages sent in private chat create a topic in the forum group and mirror responses between private DM and the topic. Running `/new` initiates a fresh conversation and creates a new topic.
 - **Session Continuity**: Multi-turn conversation support (`agy --conversation=<id>`) so the agent remembers previous prompts and context.
 - **Real-Time Progress Streaming**: Live Telegram message updates showing agent thinking, tool executions (`run_command`, `write_to_file`, etc.), and streaming text preview.
 - **Autopilot Toggle**: In-chat `/autopilot on|off` to toggle tool auto-approvals (`--dangerously-skip-permissions`).
@@ -113,6 +114,10 @@ systemctl --user restart uziclaw.service
 | Command | Description |
 |---|---|
 | *(Any Text)* | Sends the prompt directly to the Antigravity agent (or runs directly in shell if in `/terminal` mode) |
+| `/schedules` | Lists all active scheduled tasks with inline controls (100% programmatic, zero LLM) (alias: `/agendamentos`) |
+| `/schedule <time\|cron> <prompt>` | Directly creates a scheduled task (e.g. `/schedule "0 18 * * 5" Baixar Dexter` or `/schedule 2h Lembrar de...`) |
+| `/cancel_schedule <id>` | Cancels a scheduled task by ID (clickable: `/cancel_schedule_1`) (alias: `/cancelar_agendamento`) |
+| `/run_schedule <id>` | Immediately triggers a scheduled task for testing (clickable: `/run_schedule_1`) |
 | `/interrupt` | Interrupts the currently executing prompt or task (equivalent to pressing `Esc` in `agy` CLI or `Ctrl+C` in shell) |
 | `/cancel` | Cancels / stops the currently running agent task or terminal command |
 | `/device` | Checks host device stats: battery percentage, power drain, remaining time, CPU load, RAM, swap, disk, and uptime (aliases: `/battery`, `/stats`) |
