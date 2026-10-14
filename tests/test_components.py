@@ -751,6 +751,200 @@ x < 10 && y > 20
 
         asyncio.run(run_test())
 
+    def test_message_queueing_sequential_execution(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.bot import handle_message
+        from src.session_manager import session_manager
+
+        async def run_test():
+            chat_id = 55667788
+            user = DummyUser(chat_id)
+            chat = MagicMock(type="private", id=chat_id)
+
+            session = session_manager.get_session(chat_id)
+            session.reset_conversation()
+
+            executed_prompts = []
+
+            async def fake_run(*args, **kwargs):
+                prompt = kwargs.get("prompt", "")
+                executed_prompts.append(prompt)
+                # Sleep briefly to simulate turn execution time
+                await asyncio.sleep(0.05)
+                return {"status": "SUCCESS", "response": f"Reply to {prompt}", "conversation_id": "test-cid"}
+
+            msg1 = MagicMock(text="First prompt", photo=None, voice=None, audio=None, document=None)
+            status_msg1 = MagicMock()
+            status_msg1.edit_text = AsyncMock()
+            msg1.reply_text = AsyncMock(return_value=status_msg1)
+            update1 = MagicMock(effective_message=msg1, effective_user=user, effective_chat=chat)
+
+            msg2 = MagicMock(text="Second prompt", photo=None, voice=None, audio=None, document=None)
+            status_msg2 = MagicMock()
+            status_msg2.edit_text = AsyncMock()
+            msg2.reply_text = AsyncMock(return_value=status_msg2)
+            update2 = MagicMock(effective_message=msg2, effective_user=user, effective_chat=chat)
+
+            ctx = MagicMock()
+
+            with patch("src.auth.is_user_authorized", return_value=True), \
+                 patch.object(session.runner, "run", side_effect=fake_run):
+                # Launch both concurrently
+                t1 = asyncio.create_task(handle_message(update1, ctx))
+                # Slight yield so t1 acquires lock and starts running
+                await asyncio.sleep(0.01)
+                t2 = asyncio.create_task(handle_message(update2, ctx))
+
+                await asyncio.gather(t1, t2)
+
+            # Neither should have been rejected with "turn already in progress"
+            for call in msg1.reply_text.call_args_list:
+                self.assertNotIn("An agent turn is already in progress", call[0][0])
+            for call in msg2.reply_text.call_args_list:
+                self.assertNotIn("An agent turn is already in progress", call[0][0])
+
+            # Both prompts should have executed sequentially
+            self.assertEqual(len(executed_prompts), 2)
+            self.assertIn("First prompt", executed_prompts[0])
+            self.assertIn("Second prompt", executed_prompts[1])
+
+        asyncio.run(run_test())
+
+    def test_message_queueing_with_interrupt(self):
+        from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+        from src.bot import handle_message, cmd_interrupt
+        from src.session_manager import session_manager
+        from src.antigravity_runner import AntigravityRunner
+
+        async def run_test():
+            chat_id = 55667799
+            user = DummyUser(chat_id)
+            chat = MagicMock(type="private", id=chat_id)
+
+            session = session_manager.get_session(chat_id)
+            session.reset_conversation()
+
+            executed_prompts = []
+            turn1_interrupted = asyncio.Event()
+
+            async def fake_run(*args, **kwargs):
+                prompt = kwargs.get("prompt", "")
+                executed_prompts.append(prompt)
+                if "First" in prompt:
+                    # Wait until interrupted
+                    await turn1_interrupted.wait()
+                    return {"status": "CANCELLED", "response": "", "conversation_id": "test-cid"}
+                return {"status": "SUCCESS", "response": "Reply to second", "conversation_id": "test-cid"}
+
+            msg1 = MagicMock(text="First prompt", photo=None, voice=None, audio=None, document=None)
+            status_msg1 = MagicMock()
+            status_msg1.edit_text = AsyncMock()
+            msg1.reply_text = AsyncMock(return_value=status_msg1)
+            update1 = MagicMock(effective_message=msg1, effective_user=user, effective_chat=chat)
+
+            msg2 = MagicMock(text="Second prompt", photo=None, voice=None, audio=None, document=None)
+            status_msg2 = MagicMock()
+            status_msg2.edit_text = AsyncMock()
+            msg2.reply_text = AsyncMock(return_value=status_msg2)
+            update2 = MagicMock(effective_message=msg2, effective_user=user, effective_chat=chat)
+
+            interrupt_msg = MagicMock()
+            interrupt_msg.reply_text = AsyncMock()
+            interrupt_update = MagicMock(effective_message=interrupt_msg, effective_user=user, effective_chat=chat)
+
+            ctx = MagicMock()
+
+            async def fake_interrupt():
+                turn1_interrupted.set()
+                return True
+
+            with patch("src.auth.is_user_authorized", return_value=True), \
+                 patch.object(session.runner, "run", side_effect=fake_run), \
+                 patch.object(session.runner, "interrupt", side_effect=fake_interrupt):
+                t1 = asyncio.create_task(handle_message(update1, ctx))
+                await asyncio.sleep(0.01)
+                t2 = asyncio.create_task(handle_message(update2, ctx))
+                await asyncio.sleep(0.01)
+
+                with patch.object(AntigravityRunner, "is_running", new_callable=PropertyMock, return_value=True):
+                    await cmd_interrupt(interrupt_update, ctx)
+
+                await asyncio.gather(t1, t2)
+
+            self.assertEqual(len(executed_prompts), 2)
+            self.assertIn("First prompt", executed_prompts[0])
+            self.assertIn("Second prompt", executed_prompts[1])
+            self.assertIn("Interrupted active prompt", interrupt_msg.reply_text.call_args[0][0])
+
+        asyncio.run(run_test())
+
+    def test_message_queueing_with_cancel(self):
+        from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+        from src.bot import handle_message, cmd_cancel
+        from src.session_manager import session_manager
+        from src.antigravity_runner import AntigravityRunner
+
+        async def run_test():
+            chat_id = 55667700
+            user = DummyUser(chat_id)
+            chat = MagicMock(type="private", id=chat_id)
+
+            session = session_manager.get_session(chat_id)
+            session.reset_conversation()
+
+            executed_prompts = []
+            turn1_cancelled = asyncio.Event()
+
+            async def fake_run(*args, **kwargs):
+                prompt = kwargs.get("prompt", "")
+                executed_prompts.append(prompt)
+                if "First" in prompt:
+                    await turn1_cancelled.wait()
+                    return {"status": "CANCELLED", "response": "", "conversation_id": "test-cid"}
+                return {"status": "SUCCESS", "response": "Reply to second", "conversation_id": "test-cid"}
+
+            msg1 = MagicMock(text="First prompt", photo=None, voice=None, audio=None, document=None)
+            status_msg1 = MagicMock()
+            status_msg1.edit_text = AsyncMock()
+            msg1.reply_text = AsyncMock(return_value=status_msg1)
+            update1 = MagicMock(effective_message=msg1, effective_user=user, effective_chat=chat)
+
+            msg2 = MagicMock(text="Second prompt", photo=None, voice=None, audio=None, document=None)
+            status_msg2 = MagicMock()
+            status_msg2.edit_text = AsyncMock()
+            msg2.reply_text = AsyncMock(return_value=status_msg2)
+            update2 = MagicMock(effective_message=msg2, effective_user=user, effective_chat=chat)
+
+            cancel_msg = MagicMock()
+            cancel_msg.reply_text = AsyncMock()
+            cancel_update = MagicMock(effective_message=cancel_msg, effective_user=user, effective_chat=chat)
+
+            ctx = MagicMock()
+
+            async def fake_cancel():
+                turn1_cancelled.set()
+                return True
+
+            with patch("src.auth.is_user_authorized", return_value=True), \
+                 patch.object(session.runner, "run", side_effect=fake_run), \
+                 patch.object(session.runner, "cancel", side_effect=fake_cancel):
+                t1 = asyncio.create_task(handle_message(update1, ctx))
+                await asyncio.sleep(0.01)
+                t2 = asyncio.create_task(handle_message(update2, ctx))
+                await asyncio.sleep(0.01)
+
+                with patch.object(AntigravityRunner, "is_running", new_callable=PropertyMock, return_value=True):
+                    await cmd_cancel(cancel_update, ctx)
+
+                await asyncio.gather(t1, t2)
+
+            # Turn 1 should execute, Turn 2 should be cancelled/dropped without executing
+            self.assertEqual(len(executed_prompts), 1)
+            self.assertIn("First prompt", executed_prompts[0])
+            self.assertIn("cleared queued messages", cancel_msg.reply_text.call_args[0][0])
+
+        asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()

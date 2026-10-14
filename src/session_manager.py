@@ -1,5 +1,6 @@
 """Session state management and history retrieval."""
 
+import asyncio
 import os
 import re
 import fcntl
@@ -41,12 +42,34 @@ class SessionState:
     recent_conversations: list[str] = field(default_factory=list)
     is_busy: bool = False
     cancel_requested: bool = False
+    queued_count: int = 0
+    queue_generation: int = 0
+    _lock: Optional[asyncio.Lock] = field(default=None, repr=False)
+    _loop: Optional[object] = field(default=None, repr=False)
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if self._lock is None or (current_loop is not None and self._loop is not current_loop):
+            self._lock = asyncio.Lock()
+            self._loop = current_loop
+        return self._lock
+
+    def clear_queue(self) -> None:
+        """Invalidate currently queued messages."""
+        self.cancel_requested = True
+        self.queue_generation += 1
 
     def reset_conversation(self) -> None:
         """Reset conversation to start a new chat turn on next message."""
         self.conversation_id = None
         self.terminal_mode = False
         self.cancel_requested = False
+        self.queue_generation += 1
 
 
 class SessionManager:
