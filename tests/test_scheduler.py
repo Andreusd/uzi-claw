@@ -205,10 +205,61 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
         await service.execute_job(job)
 
         mock_session.runner.run.assert_called_once()
+        # Verify initial status message was sent with parse_mode='HTML'
+        mock_bot.send_message.assert_called_once()
+        self.assertEqual(mock_bot.send_message.call_args[1].get("parse_mode"), "HTML")
+
+        # Verify final edit was called with parse_mode='HTML'
+        mock_status_msg.edit_text.assert_called_once()
+        self.assertEqual(mock_status_msg.edit_text.call_args[1].get("parse_mode"), "HTML")
+
         # Verify job is completed in store
         updated = self.store.get_schedule(job.id)
         self.assertEqual(updated.status, "completed")
         self.assertIsNotNone(updated.last_run)
+
+    async def test_scheduler_service_execute_job_with_markdown_and_underscores(self):
+        """Verify markdown with underscores and code blocks is properly converted to HTML."""
+        job = self.store.add_schedule(
+            chat_id=999,
+            prompt="Download episode",
+            schedule_type="once",
+            expression="1s",
+            human_desc="Test once",
+        )
+        service = SchedulerService(store=self.store, check_interval=1)
+        mock_status_msg = MagicMock()
+        mock_status_msg.edit_text = AsyncMock()
+        mock_bot = MagicMock()
+        mock_bot.send_message = AsyncMock(return_value=mock_status_msg)
+
+        mock_session = MagicMock()
+        mock_session.lock = asyncio.Lock()
+        mock_session.cwd = "/tmp"
+        mock_session.mode = None
+        mock_session.model = None
+        mock_session.effort = None
+        # Response with characters that would crash raw Telegram Markdown
+        mock_session.runner.run = AsyncMock(return_value={
+            "status": "SUCCESS",
+            "response": "Downloaded file: `dexter_s01e01_1080p.mkv` in /path_with_underscores/.\n**Result**: Done!",
+        })
+
+        mock_session_manager = MagicMock()
+        mock_session_manager.get_session.return_value = mock_session
+
+        service._bot = mock_bot
+        service._session_manager = mock_session_manager
+
+        await service.execute_job(job)
+
+        mock_status_msg.edit_text.assert_called_once()
+        edit_kwargs = mock_status_msg.edit_text.call_args[1]
+        self.assertEqual(edit_kwargs.get("parse_mode"), "HTML")
+        edited_text = mock_status_msg.edit_text.call_args[0][0]
+        # Should be valid HTML: <code> tags instead of raw markdown backticks, <b> for bold
+        self.assertIn("<code>dexter_s01e01_1080p.mkv</code>", edited_text)
+        self.assertIn("<b>Result</b>", edited_text)
 
 
 if __name__ == "__main__":

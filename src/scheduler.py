@@ -5,7 +5,7 @@ import logging
 import re
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import contextmanager, closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -138,12 +138,12 @@ class ScheduleStore:
         self.db_path = db_path
         self._ensure_db()
 
-    from contextlib import contextmanager
-
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
         try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
             with conn:
                 yield conn
         finally:
@@ -459,7 +459,7 @@ class SchedulerService:
                 self._bot,
                 chat_id=job.chat_id,
                 text=status_text,
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
 
             # Context injection
@@ -508,20 +508,20 @@ class SchedulerService:
                 # Send final result
                 chunks = split_message(final_text)
                 if status_msg and chunks:
-                    await safe_edit(status_msg, chunks[0])
+                    await safe_edit(status_msg, chunks[0], parse_mode="HTML")
                     for chunk in chunks[1:]:
-                        await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="Markdown")
+                        await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="HTML")
                 else:
                     for chunk in chunks:
-                        await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="Markdown")
+                        await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="HTML")
 
             except Exception as e:
                 logger.error("Exception during scheduled task execution #%d: %s", job.id, e, exc_info=True)
                 err_text = f"❌ *[Tarefa #{job.id} Erro]*: `{e}`"
                 if status_msg:
-                    await safe_edit(status_msg, err_text)
+                    await safe_edit(status_msg, err_text, parse_mode="HTML")
                 else:
-                    await safe_send(self._bot, chat_id=job.chat_id, text=err_text, parse_mode="Markdown")
+                    await safe_send(self._bot, chat_id=job.chat_id, text=err_text, parse_mode="HTML")
             finally:
                 session.is_busy = False
 

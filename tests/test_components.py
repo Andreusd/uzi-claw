@@ -11,7 +11,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.auth import load_authorized_users, is_user_authorized
 from src.session_manager import session_manager
-from src.formatters import split_message
+from src.formatters import split_message, format_tool_description, LiveStatusTracker, RateLimitedMessageUpdater
 from src.antigravity_runner import AntigravityRunner
 
 
@@ -1010,6 +1010,68 @@ x < 10 && y > 20
                 self.assertIn("interrompida", res["response"])
 
         asyncio.run(run_test())
+
+    def test_format_tool_description(self):
+        # run_command with CommandLine and toolAction
+        desc1 = format_tool_description("run_command", {"CommandLine": "git diff", "toolAction": "Checking diff"})
+        self.assertIn("Checking diff", desc1)
+        self.assertIn("git diff", desc1)
+
+        # view_file with AbsolutePath
+        desc2 = format_tool_description("view_file", {"AbsolutePath": "/home/user/project/src/main.py"})
+        self.assertEqual(desc2, "Lendo `main.py`")
+
+        # replace_file_content with TargetFile
+        desc3 = format_tool_description("replace_file_content", {"TargetFile": "/home/user/config.json"})
+        self.assertEqual(desc3, "Editando `config.json`")
+
+        # write_to_file with TargetFile
+        desc4 = format_tool_description("write_to_file", {"TargetFile": "/home/user/new.py"})
+        self.assertEqual(desc4, "Criando `new.py`")
+
+        # search_web
+        desc5 = format_tool_description("search_web", {"query": "python telegram bot"})
+        self.assertIn("Buscando na web", desc5)
+
+        # Generic fallback
+        desc6 = format_tool_description("custom_tool", {"toolSummary": "Custom task summary"})
+        self.assertEqual(desc6, "Custom task summary")
+
+    def test_live_status_tracker(self):
+        from unittest.mock import MagicMock, AsyncMock
+
+        msg_mock = MagicMock()
+        msg_mock.edit_text = AsyncMock()
+        msg_mock.text = "Initial"
+        updater = RateLimitedMessageUpdater(msg_mock, min_interval=0.0)
+        tracker = LiveStatusTracker(updater, max_history=2)
+
+        async def run_tracker():
+            # 1. Thought arrives
+            await tracker.on_event("thought", "Analyzing system logs to find error root cause")
+            text1 = tracker.build_dashboard_text()
+            self.assertIn("💭 _Analyzing system logs to find error root cause_", text1)
+
+            # 2. Tool starts
+            await tracker.on_event("tool_start", {
+                "name": "run_command",
+                "parameters": {"CommandLine": "pytest tests/", "toolAction": "Running test suite"}
+            })
+            text2 = tracker.build_dashboard_text()
+            self.assertIn("⚙️ *Agora:* Running test suite", text2)
+
+            # 3. Tool finishes -> moves to history
+            await tracker.on_event("tool_done", {"name": "run_command", "output": "OK"})
+            text3 = tracker.build_dashboard_text()
+            self.assertIn("✅ Running test suite", text3)
+            self.assertNotIn("⚙️ *Agora:*", text3)
+
+            # 4. Text response streaming
+            await tracker.on_event("text_delta", "Testes concluídos com sucesso!")
+            text4 = tracker.build_dashboard_text()
+            self.assertIn("💬 Testes concluídos com sucesso!", text4)
+
+        asyncio.run(run_tracker())
 
 
 if __name__ == "__main__":
