@@ -33,7 +33,7 @@ if HAS_DBUS:
         def __init__(self, bus: dbus.Bus, object_path: str, menu_path: str):
             super().__init__(bus, object_path)
             self.menu_path = menu_path
-            self.icon_name = "telegram-bridge"
+            self.icon_name = "uziclaw"
             self.title = "UziClaw: Online"
             self.status = "Active"
 
@@ -376,10 +376,10 @@ if HAS_DBUS:
         def refresh_state(self):
             is_running, desc, _ = self.get_activity_status()
             if is_running:
-                icon = "telegram-bridge-active"
+                icon = "uziclaw-active"
                 title = f"UziClaw: {desc}"
             else:
-                icon = "telegram-bridge"
+                icon = "uziclaw"
                 title = "UziClaw: Online"
 
             icon_changed = self.sni.update_icon(icon, title)

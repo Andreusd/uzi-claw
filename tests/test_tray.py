@@ -15,6 +15,8 @@ class TestTrayComponent(unittest.TestCase):
         """Verify generated tray icons exist in icons directory."""
         icons_path = Path(ICONS_DIR)
         self.assertTrue(icons_path.exists(), "icons directory should exist")
+        self.assertTrue((icons_path / "uziclaw.png").exists(), "uziclaw.png missing")
+        self.assertTrue((icons_path / "uziclaw-active.png").exists(), "uziclaw-active.png missing")
         self.assertTrue((icons_path / "telegram-bridge.png").exists(), "telegram-bridge.png missing")
         self.assertTrue((icons_path / "telegram-bridge-active.png").exists(), "telegram-bridge-active.png missing")
 
