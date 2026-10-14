@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate monochrome symbolic tray icons for Antigravity Telegram Bridge."""
+"""Generate monochrome symbolic tray icons for UziClaw Telegram Bridge."""
 
 from pathlib import Path
 import cairo

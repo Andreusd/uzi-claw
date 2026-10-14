@@ -1,4 +1,4 @@
-"""Main entry point for Antigravity Telegram Bot."""
+"""Main entry point for UziClaw Telegram Bot."""
 
 import logging
 import sys
@@ -40,7 +40,7 @@ def main() -> None:
     if ENABLE_TRAY_ICON and "--no-tray" not in sys.argv:
         start_tray_in_background(session_manager=session_manager)
 
-    logger.info("Starting Antigravity Telegram Bot...")
+    logger.info("Starting UziClaw Telegram Bot...")
     app = create_application()
     app.run_polling()
 

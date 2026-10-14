@@ -287,10 +287,10 @@ async def safe_edit(msg: Message, text: str, parse_mode: Optional[str] = "HTML")
 
 def format_usage_data(usage_data: dict) -> str:
     """Format structured usage/quota data into a clean, mobile-friendly Telegram Markdown message."""
-    lines = ["📊 *Antigravity Quota Usage*\n"]
+    lines = ["📊 *UziClaw Quota Usage*\n"]
     groups = usage_data.get("groups", [])
     if not groups:
-        return "📊 *Antigravity Quota Usage*\n\n_No quota groups found._"
+        return "📊 *UziClaw Quota Usage*\n\n_No quota groups found._"
 
     for group in groups:
         gname = group.get("name", "Model Group")

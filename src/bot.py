@@ -154,7 +154,7 @@ async def prepare_prompt_from_message(update: Update, context: ContextTypes.DEFA
 
     # 5. Plain text
     if msg.text:
-        return msg.text.strip(), "🤖 *Antigravity:* Initializing..."
+        return msg.text.strip(), "🤖 *UziClaw:* Initializing..."
 
     return "", ""
 
@@ -174,7 +174,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     text = (
         f"👋 Hello {user.first_name if user else 'there'}!\n\n"
-        "I am your **Antigravity CLI** bridge on this computer.\n"
+        "I am **UziClaw**, your AI agent bridge on this computer.\n"
         "Send me any message, photo, voice note, or prompt, and I will forward it to `agy`.\n\n"
         "🛠 **Available Commands:**\n"
         "• `/status` - Check current session, directory & settings\n"
@@ -225,7 +225,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     terminal_str = "🟢 Active (shell)" if session.terminal_mode else "⚪ Inactive (LLM mode)"
 
     text = (
-        "📊 **Antigravity Session Status**\n\n"
+        "📊 **UziClaw Session Status**\n\n"
         f"• **Status:** {status_emoji}\n"
         f"• **Telegram User ID:** `{user.id if user else 'unknown'}`\n"
         f"• **Conversation ID:** `{cid}`\n"
@@ -251,7 +251,7 @@ async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if usage_data:
             formatted = format_usage_data(usage_data)
         elif raw_text:
-            formatted = f"📊 *Antigravity Quota Usage*\n\n```\n{raw_text}\n```"
+            formatted = f"📊 *UziClaw Quota Usage*\n\n```\n{raw_text}\n```"
         else:
             formatted = "❌ Could not retrieve usage quota from `agy`. Please try again."
 

@@ -1,4 +1,4 @@
-"""Native Linux system tray indicator (StatusNotifierItem + DBusMenu) for Antigravity Telegram Bridge."""
+"""Native Linux system tray indicator (StatusNotifierItem + DBusMenu) for UziClaw Telegram Bridge."""
 
 import os
 import sys
@@ -34,7 +34,7 @@ if HAS_DBUS:
             super().__init__(bus, object_path)
             self.menu_path = menu_path
             self.icon_name = "telegram-bridge"
-            self.title = "Antigravity Bridge: Online"
+            self.title = "UziClaw: Online"
             self.status = "Active"
 
         @dbus.service.method("org.freedesktop.DBus.Properties", in_signature="ss", out_signature="v")
@@ -42,7 +42,7 @@ if HAS_DBUS:
             if prop == "Category":
                 return "ApplicationStatus"
             elif prop == "Id":
-                return "antigravity-telegram-bridge"
+                return "uziclaw-bridge"
             elif prop == "Title":
                 return self.title
             elif prop == "Status":
@@ -61,7 +61,7 @@ if HAS_DBUS:
         def GetAll(self, interface: str):
             return {
                 "Category": "ApplicationStatus",
-                "Id": "antigravity-telegram-bridge",
+                "Id": "uziclaw-bridge",
                 "Title": self.title,
                 "Status": self.status,
                 "IconName": self.icon_name,
@@ -130,7 +130,7 @@ if HAS_DBUS:
             items.append((
                 dbus.Int32(item_id),
                 dbus.Dictionary({
-                    "label": dbus.String("✈️ Antigravity Telegram Bridge", variant_level=1),
+                    "label": dbus.String("🐾 UziClaw Telegram Bridge", variant_level=1),
                     "enabled": dbus.Boolean(False, variant_level=1),
                 }, signature="sv"),
                 empty_children
@@ -377,10 +377,10 @@ if HAS_DBUS:
             is_running, desc, _ = self.get_activity_status()
             if is_running:
                 icon = "telegram-bridge-active"
-                title = f"Antigravity Bridge: {desc}"
+                title = f"UziClaw: {desc}"
             else:
                 icon = "telegram-bridge"
-                title = "Antigravity Bridge: Online"
+                title = "UziClaw: Online"
 
             icon_changed = self.sni.update_icon(icon, title)
             if icon_changed or True:
@@ -421,12 +421,12 @@ if HAS_DBUS:
             self.refresh_state()
 
         def restart_service(self):
-            logger.info("Tray clicked: Restarting antigravity-telegram.service")
-            subprocess.Popen(["systemctl", "--user", "restart", "antigravity-telegram.service"])
+            logger.info("Tray clicked: Restarting uziclaw.service")
+            subprocess.Popen(["systemctl", "--user", "restart", "uziclaw.service"])
 
         def stop_service(self):
-            logger.info("Tray clicked: Stopping antigravity-telegram.service")
-            subprocess.Popen(["systemctl", "--user", "stop", "antigravity-telegram.service"])
+            logger.info("Tray clicked: Stopping uziclaw.service")
+            subprocess.Popen(["systemctl", "--user", "stop", "uziclaw.service"])
 
         def run(self):
             loop = GLib.MainLoop()
@@ -435,7 +435,7 @@ if HAS_DBUS:
 
 def open_terminal_logs():
     """Launch terminal emulator following journalctl logs."""
-    cmd = ["journalctl", "--user", "-u", "antigravity-telegram.service", "-f"]
+    cmd = ["journalctl", "--user", "-u", "uziclaw.service", "-f"]
     # Check preferred terminals
     for term in ["ptyxis", "gnome-terminal", "xterm"]:
         if subprocess.run(["which", term], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
@@ -471,7 +471,7 @@ def start_tray_in_background(session_manager=None) -> Optional["TelegramBridgeTr
         app = TelegramBridgeTrayApp(session_manager=session_manager)
         thread = threading.Thread(target=app.run, name="TelegramBridgeTray", daemon=True)
         thread.start()
-        logger.info("Antigravity Telegram Bridge tray icon started in background thread.")
+        logger.info("UziClaw Telegram Bridge tray icon started in background thread.")
         return app
     except Exception as e:
         logger.warning("Could not initialize system tray indicator: %s", e)

@@ -1,0 +1,16 @@
+[Unit]
+Description=UziClaw Telegram Agent Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/Projects/UziClaw
+ExecStart=%h/Documents/Projects/UziClaw/.venv/bin/python3 %h/Documents/Projects/UziClaw/main.py
+Restart=always
+RestartSec=5s
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

@@ -1,1 +1,1 @@
-"""Antigravity CLI Telegram Bot package."""
+"""UziClaw Telegram Bot package."""

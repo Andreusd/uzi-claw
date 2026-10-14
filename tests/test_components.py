@@ -1,4 +1,4 @@
-"""Verification tests for Antigravity Telegram Bot components."""
+"""Verification tests for UziClaw Telegram Bot components."""
 
 import asyncio
 import sys
@@ -322,7 +322,7 @@ class TestBotComponents(unittest.TestCase):
             ]
         }
         formatted = format_usage_data(sample_data)
-        self.assertIn("Antigravity Quota Usage", formatted)
+        self.assertIn("UziClaw Quota Usage", formatted)
         self.assertIn("Gemini Models", formatted)
         self.assertIn("Gemini Flash, Gemini Pro", formatted)
         self.assertIn("Weekly Limit", formatted)
@@ -363,7 +363,7 @@ class TestBotComponents(unittest.TestCase):
             msg_mock.reply_text.assert_called_once()
             status_msg_mock.edit_text.assert_called_once()
             edited_text = status_msg_mock.edit_text.call_args[0][0]
-            self.assertIn("Antigravity Quota Usage", edited_text)
+            self.assertIn("UziClaw Quota Usage", edited_text)
             self.assertIn("90%", edited_text)
 
         asyncio.run(run_test())

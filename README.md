@@ -1,4 +1,4 @@
-# Antigravity CLI Telegram Bot Bridge
+# UziClaw - Personal AI Telegram Bridge
 
 A secure, private Telegram Bot bridge connected directly to your local Antigravity CLI (`agy`) agent on this computer.
 
@@ -17,13 +17,13 @@ A secure, private Telegram Bot bridge connected directly to your local Antigravi
 ## Directory Structure
 
 ```text
-~/Documents/Projects/AntigravityTelegramBridge/
+~/Documents/Projects/UziClaw/
 ├── .env.example                # Template for configuration
 ├── .env                        # Local configuration & Telegram Token
 ├── authorized_users.txt.example# Template for authorized Telegram user IDs
 ├── requirements.txt            # Python dependencies
 ├── main.py                     # Bot entrypoint (starts bot and optional tray)
-├── antigravity-telegram.service # Systemd service unit definition
+├── uziclaw.service             # Systemd service unit definition
 ├── icons/                      # Flat monochrome symbolic icons for system tray
 │   ├── telegram-bridge.png     # Idle / online indicator
 │   ├── telegram-bridge-active.png # Running agent turn indicator
@@ -50,7 +50,7 @@ A secure, private Telegram Bot bridge connected directly to your local Antigravi
 Obtain a token from [@BotFather](https://t.me/botfather) and add it to `.env`:
 
 ```bash
-# In ~/Documents/Projects/AntigravityTelegramBridge/.env:
+# In ~/Documents/Projects/UziClaw/.env:
 TELEGRAM_TOKEN=123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ
 ```
 
@@ -76,13 +76,13 @@ cp authorized_users.txt.example authorized_users.txt
 ### Manual Execution (for testing):
 
 ```bash
-cd ~/Documents/Projects/AntigravityTelegramBridge
+cd ~/Documents/Projects/UziClaw
 ./.venv/bin/python3 main.py
 ```
 
 ### Systemd Background Service (Boot Startup):
 
-The service unit is already installed at `~/.config/systemd/user/antigravity-telegram.service`.
+The service unit is installed at `~/.config/systemd/user/uziclaw.service`.
 
 Once you have added your `TELEGRAM_TOKEN` to `.env`:
 
@@ -91,19 +91,19 @@ Once you have added your `TELEGRAM_TOKEN` to `.env`:
 systemctl --user daemon-reload
 
 # Enable and start the service
-systemctl --user enable --now antigravity-telegram.service
+systemctl --user enable --now uziclaw.service
 
 # Check service status
-systemctl --user status antigravity-telegram.service
+systemctl --user status uziclaw.service
 
 # View live logs
-journalctl --user -u antigravity-telegram.service -f
+journalctl --user -u uziclaw.service -f
 ```
 
 To stop or restart:
 ```bash
-systemctl --user stop antigravity-telegram.service
-systemctl --user restart antigravity-telegram.service
+systemctl --user stop uziclaw.service
+systemctl --user restart uziclaw.service
 ```
 
 ---
