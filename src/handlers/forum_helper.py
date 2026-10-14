@@ -1,14 +1,29 @@
 """Forum topics helpers, isolation logic, and title generation for UziClaw."""
 
+import asyncio
+import inspect
 import logging
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
+import httpx
 from telegram import Message, Chat
+from telegram.error import TimedOut, NetworkError, RetryAfter
 
 from ..config import FORUM_GROUP_ID
 
 logger = logging.getLogger(__name__)
+
+# Telegram Forum Topic Custom Emoji IDs (from official topic icons sticker pack)
+FORUM_TOPIC_ICONS = {
+    "chat": "5417915203100613993",     # 💬
+    "voice": "5377544228505134960",    # 🎙
+    "image": "5310039132297242441",    # 🎨
+    "audio": "5310045076531978942",    # 🎵
+    "document": "5357315181649076022", # 📁
+    "terminal": "5350554349074391003", # 💻
+    "command": "5312016608254762256",  # ⚡️
+}
 
 
 def is_forum_general_chat(chat: Optional[Chat], msg: Optional[Message]) -> bool:
@@ -105,6 +120,87 @@ def generate_topic_name(prompt_text: str, default_prefix: str = "Conversa") -> s
     if len(title) > 120:
         title = title[:117] + "..."
     return title[:128]
+
+
+def get_topic_icon_id(prompt_text: Optional[str] = None, topic_type: Optional[str] = None) -> str:
+    """
+    Get the official Telegram forum topic custom emoji ID based on topic type or prompt content.
+    """
+    if topic_type and topic_type in FORUM_TOPIC_ICONS:
+        return FORUM_TOPIC_ICONS[topic_type]
+
+    if not prompt_text:
+        return FORUM_TOPIC_ICONS["chat"]
+
+    cleaned = clean_prompt_for_display(prompt_text)
+    if cleaned.startswith("[Attached Voice Note:"):
+        return FORUM_TOPIC_ICONS["voice"]
+    if cleaned.startswith("[Attached Image:"):
+        return FORUM_TOPIC_ICONS["image"]
+    if cleaned.startswith("[Attached Audio File:"):
+        return FORUM_TOPIC_ICONS["audio"]
+    if cleaned.startswith("[Attached Document:"):
+        return FORUM_TOPIC_ICONS["document"]
+
+    return FORUM_TOPIC_ICONS["chat"]
+
+
+async def create_forum_topic_with_retry(
+    bot: Any,
+    chat_id: int | str,
+    name: str,
+    icon_custom_emoji_id: Optional[str] = None,
+    icon_color: Optional[int] = None,
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+) -> Optional[Any]:
+    """
+    Create a forum topic with automatic retries for transient network/connection errors and rate limits.
+    """
+    last_err: Optional[Exception] = None
+    kwargs: dict[str, Any] = {"chat_id": chat_id, "name": name}
+    if icon_custom_emoji_id is not None:
+        kwargs["icon_custom_emoji_id"] = icon_custom_emoji_id
+    if icon_color is not None:
+        kwargs["icon_color"] = icon_color
+
+    create_fn = getattr(bot, "create_forum_topic", None)
+    if not create_fn or not callable(create_fn):
+        logger.error("Bot instance does not have a callable create_forum_topic method")
+        return None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            res = create_fn(**kwargs)
+            topic = await res if inspect.isawaitable(res) else res
+            return topic
+        except RetryAfter as e:
+            last_err = e
+            delay = float(e.retry_after) + 0.5
+            logger.warning(
+                "Rate limit hit on create_forum_topic (attempt %d/%d). Sleeping %.1fs...",
+                attempt,
+                max_retries,
+                delay,
+            )
+            await asyncio.sleep(delay)
+        except (TimedOut, NetworkError, httpx.HTTPError, ConnectionError, asyncio.TimeoutError) as e:
+            last_err = e
+            delay = initial_delay * (2 ** (attempt - 1))
+            logger.warning(
+                "Network error on create_forum_topic: %s (attempt %d/%d). Retrying in %.1fs...",
+                e,
+                attempt,
+                max_retries,
+                delay,
+            )
+            await asyncio.sleep(delay)
+        except Exception as e:
+            logger.error("Non-retriable error creating forum topic for chat %s: %s", chat_id, e)
+            return None
+
+    logger.error("Failed to create forum topic after %d attempts for chat %s: %s", max_retries, chat_id, last_err)
+    return None
 
 
 def format_user_prompt_preview(msg: Optional[Message], prompt_text: str, origin: Optional[str] = None) -> str:

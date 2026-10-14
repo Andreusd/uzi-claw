@@ -17,6 +17,7 @@ from ..formatters import (
     safe_edit,
     format_terminal_output,
     RateLimitedMessageUpdater,
+    LiveStatusTracker,
 )
 from ..media_manager import download_telegram_file_with_retry
 from .commands import get_session_from_update
@@ -24,6 +25,9 @@ from .forum_helper import (
     is_forum_general_chat,
     generate_topic_name,
     format_user_prompt_preview,
+    get_topic_icon_id,
+    FORUM_TOPIC_ICONS,
+    create_forum_topic_with_retry,
 )
 
 logger = logging.getLogger(__name__)
@@ -185,15 +189,16 @@ async def _handle_general_forum_message(update: Update, context: ContextTypes.DE
         return
 
     topic_name = generate_topic_name(prompt_text)
-    try:
-        import inspect
-        res = context.bot.create_forum_topic(chat_id=chat.id, name=topic_name)
-        topic = await res if inspect.isawaitable(res) else res
-        target_thread_id = getattr(topic, "message_thread_id", None)
-        if target_thread_id is None:
-            raise ValueError("Created topic did not contain message_thread_id")
-    except Exception as e:
-        logger.error("Failed to create forum topic for General message in chat %s: %s", chat.id, e)
+    icon_id = get_topic_icon_id(prompt_text)
+    topic = await create_forum_topic_with_retry(
+        bot=context.bot,
+        chat_id=chat.id,
+        name=topic_name,
+        icon_custom_emoji_id=icon_id,
+    )
+    target_thread_id = getattr(topic, "message_thread_id", None)
+    if target_thread_id is None:
+        logger.error("Failed to create forum topic for General message in chat %s after retries", chat.id)
         return
 
     # Dedicated fresh session for this new topic
@@ -227,28 +232,11 @@ async def _handle_general_forum_message(update: Update, context: ContextTypes.DE
             current_runner = session.runner
             try:
                 updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
-                streaming_text: list[str] = []
-                current_tool: str = ""
+                tracker = LiveStatusTracker(updater) if updater else None
 
-                async def on_event(event_type: str, data: any) -> None:
-                    if not updater:
-                        return
-                    nonlocal current_tool
-                    if event_type == "tool_start":
-                        tname = data.get("name", "tool")
-                        current_tool = tname
-                        await updater.update(f"⚙️ Running tool: `{tname}`...")
-                    elif event_type == "tool_done":
-                        current_tool = ""
-                        await updater.update("🤖 Processing results...")
-                    elif event_type == "thought":
-                        pass
-                    elif event_type == "text_delta":
-                        streaming_text.append(data)
-                        accumulated = "".join(streaming_text)
-                        if len(accumulated) > 10 and not current_tool:
-                            preview_delta = accumulated if len(accumulated) < 1500 else "..." + accumulated[-1500:]
-                            await updater.update(f"💬 {preview_delta}")
+                async def on_event(event_type: str, data: Any) -> None:
+                    if tracker:
+                        await tracker.on_event(event_type, data)
 
                 full_prompt = build_prompt_with_context(
                     prompt_text,
@@ -330,11 +318,15 @@ async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT
         # Create topic for terminal command, never post to General
         cmd_preview = command if len(command) <= 50 else command[:47] + "..."
         topic_name = f"💻 $ {cmd_preview}"
-        try:
-            topic = await context.bot.create_forum_topic(chat_id=chat.id, name=topic_name)
-            target_thread_id = topic.message_thread_id
-        except Exception as e:
-            logger.error("Failed to create topic for terminal command in General: %s", e)
+        topic = await create_forum_topic_with_retry(
+            bot=context.bot,
+            chat_id=chat.id,
+            name=topic_name,
+            icon_custom_emoji_id=FORUM_TOPIC_ICONS["terminal"],
+        )
+        target_thread_id = getattr(topic, "message_thread_id", None)
+        if target_thread_id is None:
+            logger.error("Failed to create topic for terminal command in General: %s", chat.id)
             return
 
         session = session_manager.get_session(chat.id, target_thread_id)
@@ -491,16 +483,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if is_private and FORUM_GROUP_ID:
                     if session.forum_topic_id is None or session.conversation_id is None:
                         topic_name = generate_topic_name(prompt_text)
-                        try:
-                            import inspect
-                            res = context.bot.create_forum_topic(chat_id=FORUM_GROUP_ID, name=topic_name)
-                            topic = await res if inspect.isawaitable(res) else res
-                            target_tid = getattr(topic, "message_thread_id", None)
-                            if target_tid is not None:
-                                session.forum_topic_id = target_tid
-                                session_manager.save_session(session)
-                        except Exception as e:
-                            logger.error("Failed to create forum topic for private chat: %s", e)
+                        icon_id = get_topic_icon_id(prompt_text)
+                        topic = await create_forum_topic_with_retry(
+                            bot=context.bot,
+                            chat_id=FORUM_GROUP_ID,
+                            name=topic_name,
+                            icon_custom_emoji_id=icon_id,
+                        )
+                        target_tid = getattr(topic, "message_thread_id", None)
+                        if target_tid is not None:
+                            session.forum_topic_id = target_tid
+                            session_manager.save_session(session)
 
                     if session.forum_topic_id:
                         try:
@@ -529,29 +522,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     return
 
                 updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
-                streaming_text: list[str] = []
-                current_tool: str = ""
+                tracker = LiveStatusTracker(updater) if updater else None
 
-                async def on_event(event_type: str, data: any) -> None:
-                    if not updater:
-                        return
-                    nonlocal current_tool
-                    if event_type == "tool_start":
-                        tname = data.get("name", "tool")
-                        current_tool = tname
-                        await updater.update(f"⚙️ Running tool: `{tname}`...")
-                    elif event_type == "tool_done":
-                        current_tool = ""
-                        await updater.update("🤖 Processing results...")
-                    elif event_type == "thought":
-                        pass
-                    elif event_type == "text_delta":
-                        streaming_text.append(data)
-                        accumulated = "".join(streaming_text)
-                        if len(accumulated) > 10 and not current_tool:
-                            # Preview partial text (up to last 1500 chars)
-                            preview = accumulated if len(accumulated) < 1500 else "..." + accumulated[-1500:]
-                            await updater.update(f"💬 {preview}")
+                async def on_event(event_type: str, data: Any) -> None:
+                    if tracker:
+                        await tracker.on_event(event_type, data)
 
                 # Run the prompt with injected Telegram context if enabled (first turn only)
                 is_first_turn = session.conversation_id is None

@@ -6,11 +6,22 @@ import logging
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, List, Any
+import httpx
 from telegram import Message
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, RetryAfter, TimedOut, NetworkError
 
 logger = logging.getLogger(__name__)
+
+RETRIABLE_NETWORK_EXCEPTIONS = (
+    TimedOut,
+    NetworkError,
+    RetryAfter,
+    httpx.HTTPError,
+    ConnectionError,
+    asyncio.TimeoutError,
+)
 
 TELEGRAM_MAX_LENGTH = 3500
 
@@ -229,29 +240,50 @@ async def safe_reply(
     text: str,
     parse_mode: Optional[str] = "HTML",
     reply_markup: Optional[Any] = None,
+    max_retries: int = 3,
 ) -> Optional[Message]:
-    """Send reply text, automatically converting Markdown to Telegram HTML and falling back to plain text."""
+    """Send reply text, automatically converting Markdown to Telegram HTML and falling back to plain text, with retries on network errors."""
     if not text:
         return None
-    try:
-        if parse_mode in ("HTML", "Markdown"):
-            formatted_text = markdown_to_telegram_html(text)
-            if len(formatted_text) > 4000:
-                formatted_text = sanitize_and_balance_html(formatted_text[:3980] + "...")
-            return await msg.reply_text(formatted_text, parse_mode="HTML", reply_markup=reply_markup)
-        else:
-            return await msg.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except BadRequest as e:
-        err_str = str(e).lower()
-        if "can't parse entities" in err_str or "tag" in err_str or "formatting" in err_str or "entity" in err_str:
-            logger.debug("Formatting parse failed (%s), falling back to plain text", e)
-            plain_text = text if len(text) <= 4000 else text[:3980] + "..."
-            return await msg.reply_text(plain_text, parse_mode=None, reply_markup=reply_markup)
-        logger.warning("BadRequest replying to message: %s", e)
-        return None
-    except Exception as e:
-        logger.error("Failed to reply: %s", e)
-        return None
+
+    last_err: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            if parse_mode in ("HTML", "Markdown"):
+                formatted_text = markdown_to_telegram_html(text)
+                if len(formatted_text) > 4000:
+                    formatted_text = sanitize_and_balance_html(formatted_text[:3980] + "...")
+                return await msg.reply_text(formatted_text, parse_mode="HTML", reply_markup=reply_markup)
+            else:
+                return await msg.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        except BadRequest as e:
+            err_str = str(e).lower()
+            if "can't parse entities" in err_str or "tag" in err_str or "formatting" in err_str or "entity" in err_str:
+                logger.debug("Formatting parse failed (%s), falling back to plain text", e)
+                plain_text = text if len(text) <= 4000 else text[:3980] + "..."
+                try:
+                    return await msg.reply_text(plain_text, parse_mode=None, reply_markup=reply_markup)
+                except Exception as inner_e:
+                    logger.warning("BadRequest replying with plain text: %s", inner_e)
+                    return None
+            logger.warning("BadRequest replying to message: %s", e)
+            return None
+        except RetryAfter as e:
+            last_err = e
+            delay = float(e.retry_after) + 0.5
+            logger.warning("RetryAfter hit on safe_reply (attempt %d/%d): waiting %.1fs", attempt, max_retries, delay)
+            await asyncio.sleep(delay)
+        except RETRIABLE_NETWORK_EXCEPTIONS as e:
+            last_err = e
+            delay = 0.5 * (2 ** (attempt - 1))
+            logger.warning("Network error on safe_reply (%s, attempt %d/%d). Retrying in %.1fs...", e, attempt, max_retries, delay)
+            await asyncio.sleep(delay)
+        except Exception as e:
+            logger.error("Failed to reply: %s", e)
+            return None
+
+    logger.error("safe_reply failed after %d attempts: %s", max_retries, last_err)
+    return None
 
 
 async def safe_send(
@@ -261,37 +293,55 @@ async def safe_send(
     thread_id: Optional[int] = None,
     parse_mode: Optional[str] = "HTML",
     reply_markup: Optional[Any] = None,
+    max_retries: int = 3,
 ) -> Optional[Message]:
-    """Send message to a chat and optional thread, converting Markdown to HTML and falling back to plain text."""
+    """Send message to a chat and optional thread, converting Markdown to HTML and falling back to plain text, with retries on network errors."""
     if not text:
         return None
-    try:
-        kwargs = {"chat_id": chat_id, "reply_markup": reply_markup}
-        if thread_id is not None:
-            kwargs["message_thread_id"] = thread_id
 
-        if parse_mode in ("HTML", "Markdown"):
-            formatted_text = markdown_to_telegram_html(text)
-            if len(formatted_text) > 4000:
-                formatted_text = sanitize_and_balance_html(formatted_text[:3980] + "...")
-            return await bot.send_message(**kwargs, text=formatted_text, parse_mode="HTML")
-        else:
-            send_text = text if len(text) <= 4000 else text[:3980] + "..."
-            return await bot.send_message(**kwargs, text=send_text, parse_mode=parse_mode)
-    except BadRequest as e:
-        err_str = str(e).lower()
-        if "can't parse entities" in err_str or "tag" in err_str or "formatting" in err_str or "entity" in err_str:
-            logger.debug("Formatting parse failed on safe_send (%s), falling back to plain text", e)
-            plain_text = text if len(text) <= 4000 else text[:3980] + "..."
-            kwargs = {"chat_id": chat_id, "reply_markup": reply_markup}
-            if thread_id is not None:
-                kwargs["message_thread_id"] = thread_id
-            return await bot.send_message(**kwargs, text=plain_text, parse_mode=None)
-        logger.warning("BadRequest sending message via safe_send: %s", e)
-        return None
-    except Exception as e:
-        logger.error("Failed to safe_send message: %s", e)
-        return None
+    last_err: Optional[Exception] = None
+    kwargs = {"chat_id": chat_id, "reply_markup": reply_markup}
+    if thread_id is not None:
+        kwargs["message_thread_id"] = thread_id
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            if parse_mode in ("HTML", "Markdown"):
+                formatted_text = markdown_to_telegram_html(text)
+                if len(formatted_text) > 4000:
+                    formatted_text = sanitize_and_balance_html(formatted_text[:3980] + "...")
+                return await bot.send_message(**kwargs, text=formatted_text, parse_mode="HTML")
+            else:
+                send_text = text if len(text) <= 4000 else text[:3980] + "..."
+                return await bot.send_message(**kwargs, text=send_text, parse_mode=parse_mode)
+        except BadRequest as e:
+            err_str = str(e).lower()
+            if "can't parse entities" in err_str or "tag" in err_str or "formatting" in err_str or "entity" in err_str:
+                logger.debug("Formatting parse failed on safe_send (%s), falling back to plain text", e)
+                plain_text = text if len(text) <= 4000 else text[:3980] + "..."
+                try:
+                    return await bot.send_message(**kwargs, text=plain_text, parse_mode=None)
+                except Exception as inner_e:
+                    logger.warning("BadRequest sending message with plain text: %s", inner_e)
+                    return None
+            logger.warning("BadRequest sending message via safe_send: %s", e)
+            return None
+        except RetryAfter as e:
+            last_err = e
+            delay = float(e.retry_after) + 0.5
+            logger.warning("RetryAfter hit on safe_send (attempt %d/%d): waiting %.1fs", attempt, max_retries, delay)
+            await asyncio.sleep(delay)
+        except RETRIABLE_NETWORK_EXCEPTIONS as e:
+            last_err = e
+            delay = 0.5 * (2 ** (attempt - 1))
+            logger.warning("Network error on safe_send (%s, attempt %d/%d). Retrying in %.1fs...", e, attempt, max_retries, delay)
+            await asyncio.sleep(delay)
+        except Exception as e:
+            logger.error("Failed to safe_send message: %s", e)
+            return None
+
+    logger.error("safe_send failed after %d attempts: %s", max_retries, last_err)
+    return None
 
 
 async def safe_edit(
@@ -299,40 +349,52 @@ async def safe_edit(
     text: str,
     parse_mode: Optional[str] = "HTML",
     reply_markup: Optional[Any] = None,
+    max_retries: int = 2,
 ) -> bool:
-    """Edit message text, automatically converting Markdown to Telegram HTML and falling back to plain text."""
-    try:
-        if parse_mode in ("HTML", "Markdown"):
-            formatted_text = markdown_to_telegram_html(text)
-            edit_text = (
-                formatted_text
-                if len(formatted_text) <= TELEGRAM_MAX_LENGTH
-                else formatted_text[: TELEGRAM_MAX_LENGTH - 10] + "..."
-            )
-            edit_text = sanitize_and_balance_html(edit_text)
-            await msg.edit_text(edit_text, parse_mode="HTML", reply_markup=reply_markup)
-            return True
-        else:
-            edit_text = text if len(text) <= TELEGRAM_MAX_LENGTH else text[:TELEGRAM_MAX_LENGTH - 10] + "..."
-            await msg.edit_text(edit_text, parse_mode=parse_mode, reply_markup=reply_markup)
-            return True
-    except BadRequest as e:
-        err_str = str(e).lower()
-        if "message is not modified" in err_str:
-            return True
-        if "can't parse entities" in err_str or "tag" in err_str or "formatting" in err_str or "entity" in err_str:
-            logger.debug("Formatting parse failed on edit (%s), falling back to plain text", e)
-            try:
-                plain_text = text if len(text) <= TELEGRAM_MAX_LENGTH else text[:TELEGRAM_MAX_LENGTH - 10] + "..."
-                await msg.edit_text(plain_text, parse_mode=None, reply_markup=reply_markup)
+    """Edit message text, automatically converting Markdown to Telegram HTML and falling back to plain text, with retries on network blips."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            if parse_mode in ("HTML", "Markdown"):
+                formatted_text = markdown_to_telegram_html(text)
+                edit_text = (
+                    formatted_text
+                    if len(formatted_text) <= TELEGRAM_MAX_LENGTH
+                    else formatted_text[: TELEGRAM_MAX_LENGTH - 10] + "..."
+                )
+                edit_text = sanitize_and_balance_html(edit_text)
+                await msg.edit_text(edit_text, parse_mode="HTML", reply_markup=reply_markup)
                 return True
-            except Exception:
+            else:
+                edit_text = text if len(text) <= TELEGRAM_MAX_LENGTH else text[:TELEGRAM_MAX_LENGTH - 10] + "..."
+                await msg.edit_text(edit_text, parse_mode=parse_mode, reply_markup=reply_markup)
+                return True
+        except BadRequest as e:
+            err_str = str(e).lower()
+            if "message is not modified" in err_str:
+                return True
+            if "can't parse entities" in err_str or "tag" in err_str or "formatting" in err_str or "entity" in err_str:
+                logger.debug("Formatting parse failed on edit (%s), falling back to plain text", e)
+                try:
+                    plain_text = text if len(text) <= TELEGRAM_MAX_LENGTH else text[:TELEGRAM_MAX_LENGTH - 10] + "..."
+                    await msg.edit_text(plain_text, parse_mode=None, reply_markup=reply_markup)
+                    return True
+                except Exception:
+                    return False
+            logger.warning("BadRequest editing message: %s", e)
+            return False
+        except RetryAfter as e:
+            delay = float(e.retry_after) + 0.5
+            await asyncio.sleep(delay)
+        except RETRIABLE_NETWORK_EXCEPTIONS as e:
+            if attempt < max_retries:
+                await asyncio.sleep(0.5)
+            else:
+                logger.warning("Network error editing message after %d attempts: %s", max_retries, e)
                 return False
-        logger.warning("BadRequest editing message: %s", e)
-        return False
-    except Exception as e:
-        logger.error("Failed to edit message: %s", e)
-        return False
+        except Exception as e:
+            logger.error("Failed to edit message: %s", e)
+            return False
+    return False
 
 
 def format_usage_data(usage_data: dict) -> str:
@@ -470,6 +532,158 @@ class RateLimitedMessageUpdater:
             except Exception as e:
                 logger.warning("Error editing status message: %s", e)
                 return False
+
+
+def format_tool_description(name: str, params: Optional[dict[str, Any]] = None) -> str:
+    """Format a human-readable, concise description for a tool invocation."""
+    if not params:
+        params = {}
+
+    action = params.get("toolAction")
+    summary = params.get("toolSummary")
+
+    if name == "run_command":
+        cmd = params.get("CommandLine", "").strip()
+        if cmd:
+            first_line = cmd.splitlines()[0]
+            cmd_preview = first_line if len(first_line) <= 40 else first_line[:37] + "..."
+            if action:
+                return f"{action} (`$ {cmd_preview}`)"
+            return f"`$ {cmd_preview}`"
+        return action or "Executando comando no terminal"
+
+    if name in ("view_file", "replace_file_content", "write_to_file"):
+        path_val = params.get("TargetFile") or params.get("AbsolutePath") or ""
+        fname = Path(path_val).name if path_val else ""
+        if fname:
+            if name == "view_file":
+                verb = "Lendo"
+            elif name == "replace_file_content":
+                verb = "Editando"
+            else:
+                verb = "Criando"
+            return f"{verb} `{fname}`"
+        return action or "Acessando arquivo"
+
+    if name == "search_web":
+        query = params.get("query", "").strip()
+        query_preview = query if len(query) <= 35 else query[:32] + "..."
+        if query_preview:
+            return f'Buscando na web: "{query_preview}"'
+        return "Buscando na web"
+
+    if name == "read_url_content":
+        url = params.get("Url", "").strip()
+        url_preview = url if len(url) <= 35 else url[:32] + "..."
+        return f"Lendo página: `{url_preview}`"
+
+    if name in ("invoke_subagent", "define_subagent", "manage_subagents"):
+        return action or "Gerenciando subagente"
+
+    if action:
+        return action
+    if summary:
+        return summary
+    return f"Executando `{name}`"
+
+
+class LiveStatusTracker:
+    """
+    Tracks and formats live progress of an Antigravity turn for Telegram.
+    Maintains:
+    - Recent completed steps (checklist with checkmarks)
+    - Current active tool and human description
+    - Thought / reasoning snippet
+    - Text preview when final response starts streaming
+    """
+
+    def __init__(self, updater: RateLimitedMessageUpdater, max_history: int = 3, header: Optional[str] = None):
+        self.updater = updater
+        self.max_history = max_history
+        self.header = header
+        self.history: list[str] = []
+        self.current_tool_desc: Optional[str] = None
+        self.current_tool_name: Optional[str] = None
+        self.accumulated_thought: list[str] = []
+        self.accumulated_text: list[str] = []
+
+    def _get_thought_snippet(self, max_chars: int = 140) -> str:
+        """Extract the most recent thought snippet."""
+        if not self.accumulated_thought:
+            return ""
+        full = "".join(self.accumulated_thought).strip()
+        if not full:
+            return ""
+        lines = [line.strip() for line in full.splitlines() if line.strip()]
+        if not lines:
+            return ""
+        last_line = lines[-1]
+        last_line = re.sub(r"[*_`#]", "", last_line).strip()
+        if len(last_line) > max_chars:
+            last_line = "..." + last_line[-max_chars:]
+        return last_line
+
+    def build_dashboard_text(self) -> str:
+        """Compose the live status dashboard text."""
+        parts = []
+
+        if self.header:
+            parts.append(self.header.strip())
+        else:
+            parts.append("⏳ *Executando tarefa...*")
+
+        thought_snippet = self._get_thought_snippet()
+        if thought_snippet and not self.accumulated_text:
+            parts.append(f"\n💭 _{thought_snippet}_")
+
+        if self.history:
+            history_lines = [f"✅ {step}" for step in self.history[-self.max_history:]]
+            parts.append("\n" + "\n".join(history_lines))
+
+        if self.current_tool_desc:
+            parts.append(f"⚙️ *Agora:* {self.current_tool_desc}...")
+        elif not self.accumulated_text and not self.history:
+            parts.append("\n🤖 _Processando..._")
+
+        if self.accumulated_text and not self.current_tool_desc:
+            resp_accum = "".join(self.accumulated_text)
+            if len(resp_accum) > 10:
+                preview = resp_accum if len(resp_accum) < 1200 else "..." + resp_accum[-1200:]
+                parts.append(f"\n💬 {preview}")
+
+        return "\n".join(parts)
+
+    async def on_event(self, event_type: str, data: Any) -> None:
+        """Process an event from the Antigravity runner stream."""
+        if event_type == "tool_start":
+            tname = data.get("name", "tool") if isinstance(data, dict) else "tool"
+            params = data.get("parameters", {}) if isinstance(data, dict) else {}
+            self.current_tool_name = tname
+            self.current_tool_desc = format_tool_description(tname, params)
+            await self.updater.update(self.build_dashboard_text())
+
+        elif event_type == "tool_done":
+            if self.current_tool_desc:
+                desc = self.current_tool_desc
+                if not self.history or self.history[-1] != desc:
+                    self.history.append(desc)
+                    if len(self.history) > self.max_history:
+                        self.history.pop(0)
+            self.current_tool_name = None
+            self.current_tool_desc = None
+            await self.updater.update(self.build_dashboard_text())
+
+        elif event_type == "thought":
+            if isinstance(data, str) and data:
+                self.accumulated_thought.append(data)
+                if not self.current_tool_desc:
+                    await self.updater.update(self.build_dashboard_text())
+
+        elif event_type == "text_delta":
+            if isinstance(data, str) and data:
+                self.accumulated_text.append(data)
+                if not self.current_tool_desc:
+                    await self.updater.update(self.build_dashboard_text())
 
 
 def format_terminal_output(command: str, result: dict) -> List[str]:

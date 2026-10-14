@@ -14,7 +14,11 @@ from ..session_manager import session_manager, SessionState
 from ..formatters import safe_reply, safe_send, safe_edit, format_usage_data
 from ..antigravity_runner import get_usage
 from ..device_stats import format_device_stats
-from .forum_helper import is_forum_general_chat
+from .forum_helper import (
+    is_forum_general_chat,
+    FORUM_TOPIC_ICONS,
+    create_forum_topic_with_retry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +36,15 @@ def general_topic_redirect(func):
             cmd_name = func.__name__.replace("cmd_", "")
             now_str = datetime.now().strftime("%d/%m %H:%M")
             topic_name = f"🛠️ /{cmd_name} {now_str}"
-            try:
-                topic = await context.bot.create_forum_topic(chat_id=chat.id, name=topic_name)
-                target_thread = topic.message_thread_id
-            except Exception as e:
-                logger.error("Failed to create topic for /%s in General: %s", cmd_name, e)
+            topic = await create_forum_topic_with_retry(
+                bot=context.bot,
+                chat_id=chat.id,
+                name=topic_name,
+                icon_custom_emoji_id=FORUM_TOPIC_ICONS["command"],
+            )
+            target_thread = getattr(topic, "message_thread_id", None)
+            if target_thread is None:
+                logger.error("Failed to create topic for /%s in General after retries", cmd_name)
                 return
 
             orig_reply = msg.reply_text
@@ -237,11 +245,15 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # 1. In General topic of a forum supergroup:
     if is_general:
         topic_name = f"💬 Nova Conversa {now_str}"
-        try:
-            topic = await context.bot.create_forum_topic(chat_id=chat.id, name=topic_name)
-            target_thread_id = topic.message_thread_id
-        except Exception as e:
-            logger.error("Failed to create topic for /new in General: %s", e)
+        topic = await create_forum_topic_with_retry(
+            bot=context.bot,
+            chat_id=chat.id,
+            name=topic_name,
+            icon_custom_emoji_id=FORUM_TOPIC_ICONS["chat"],
+        )
+        target_thread_id = getattr(topic, "message_thread_id", None)
+        if target_thread_id is None:
+            logger.error("Failed to create topic for /new in General after retries")
             return
 
         session = session_manager.get_session(chat.id, target_thread_id)
@@ -271,16 +283,14 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         topic = None
         if FORUM_GROUP_ID and context and getattr(context, "bot", None):
             topic_name = f"💬 Nova Conversa {now_str}"
-            try:
-                create_fn = getattr(context.bot, "create_forum_topic", None)
-                if create_fn and callable(create_fn):
-                    res = create_fn(chat_id=FORUM_GROUP_ID, name=topic_name)
-                    import inspect
-                    topic = await res if inspect.isawaitable(res) else res
-                    if topic and hasattr(topic, "message_thread_id"):
-                        session.forum_topic_id = topic.message_thread_id
-            except Exception as e:
-                logger.error("Failed to create forum topic for /new in private chat: %s", e)
+            topic = await create_forum_topic_with_retry(
+                bot=context.bot,
+                chat_id=FORUM_GROUP_ID,
+                name=topic_name,
+                icon_custom_emoji_id=FORUM_TOPIC_ICONS["chat"],
+            )
+            if topic and hasattr(topic, "message_thread_id"):
+                session.forum_topic_id = topic.message_thread_id
 
         session_manager.save_session(session)
 
@@ -312,11 +322,15 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     topic_name = f"💬 Nova Conversa {now_str}"
-    try:
-        topic = await context.bot.create_forum_topic(chat_id=chat.id, name=topic_name)
-        new_thread_id = topic.message_thread_id
-    except Exception as e:
-        logger.error("Failed to create topic in forum group for /new: %s", e)
+    topic = await create_forum_topic_with_retry(
+        bot=context.bot,
+        chat_id=chat.id,
+        name=topic_name,
+        icon_custom_emoji_id=FORUM_TOPIC_ICONS["chat"],
+    )
+    new_thread_id = getattr(topic, "message_thread_id", None)
+    if new_thread_id is None:
+        logger.error("Failed to create topic in forum group for /new after retries")
         session.reset_conversation()
         session_manager.save_session(session)
         await safe_reply(msg, "✨ Nova conversa iniciada!")

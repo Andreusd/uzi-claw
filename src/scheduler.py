@@ -14,7 +14,7 @@ from typing import Optional, List, Dict, Any
 from croniter import croniter
 
 from .config import SCHEDULES_DB_PATH, SCHEDULE_CHECK_INTERVAL, INJECT_TELEGRAM_CONTEXT
-from .formatters import split_message, safe_reply, safe_edit, RateLimitedMessageUpdater
+from .formatters import split_message, safe_reply, safe_send, safe_edit, RateLimitedMessageUpdater, LiveStatusTracker
 
 logger = logging.getLogger(__name__)
 
@@ -455,15 +455,12 @@ class SchedulerService:
 
             # Notify Telegram that the scheduled task actually started
             status_text = f"⏰ *{tag} Tarefa #{job.id} Iniciada:*\n_{job.human_desc or job.prompt}_\n\n⏳ Executando..."
-            try:
-                status_msg = await self._bot.send_message(
-                    chat_id=job.chat_id,
-                    text=status_text,
-                    parse_mode="Markdown",
-                )
-            except Exception as e:
-                logger.error("Failed to send schedule start notification to chat_id=%s: %s", job.chat_id, e)
-                status_msg = None
+            status_msg = await safe_send(
+                self._bot,
+                chat_id=job.chat_id,
+                text=status_text,
+                parse_mode="Markdown",
+            )
 
             # Context injection
             full_prompt = (
@@ -474,26 +471,14 @@ class SchedulerService:
             )
 
             updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
-            streaming_text: list[str] = []
-            current_tool: str = ""
+            tracker = LiveStatusTracker(
+                updater,
+                header=f"⏰ *{tag} Tarefa #{job.id}:*\n_{job.human_desc or job.prompt}_\n",
+            ) if updater else None
 
             async def on_event(event_type: str, data: Any) -> None:
-                if not updater:
-                    return
-                nonlocal current_tool
-                if event_type == "tool_start":
-                    tname = data.get("name", "tool")
-                    current_tool = tname
-                    await updater.update(f"⏰ *{tag} Tarefa #{job.id}:*\n⚙️ Running tool: `{tname}`...")
-                elif event_type == "tool_done":
-                    current_tool = ""
-                    await updater.update(f"⏰ *{tag} Tarefa #{job.id}:*\n🤖 Processando resultados...")
-                elif event_type == "text_delta":
-                    streaming_text.append(data)
-                    accumulated = "".join(streaming_text)
-                    if len(accumulated) > 10 and not current_tool:
-                        preview = accumulated if len(accumulated) < 1200 else "..." + accumulated[-1200:]
-                        await updater.update(f"⏰ *{tag} Tarefa #{job.id}:*\n💬 {preview}")
+                if tracker:
+                    await tracker.on_event(event_type, data)
 
             try:
                 # Use a fresh turn for scheduled runs
@@ -525,10 +510,10 @@ class SchedulerService:
                 if status_msg and chunks:
                     await safe_edit(status_msg, chunks[0])
                     for chunk in chunks[1:]:
-                        await self._bot.send_message(chat_id=job.chat_id, text=chunk, parse_mode="Markdown")
+                        await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="Markdown")
                 else:
                     for chunk in chunks:
-                        await self._bot.send_message(chat_id=job.chat_id, text=chunk, parse_mode="Markdown")
+                        await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="Markdown")
 
             except Exception as e:
                 logger.error("Exception during scheduled task execution #%d: %s", job.id, e, exc_info=True)
@@ -536,7 +521,7 @@ class SchedulerService:
                 if status_msg:
                     await safe_edit(status_msg, err_text)
                 else:
-                    await self._bot.send_message(chat_id=job.chat_id, text=err_text, parse_mode="Markdown")
+                    await safe_send(self._bot, chat_id=job.chat_id, text=err_text, parse_mode="Markdown")
             finally:
                 session.is_busy = False
 

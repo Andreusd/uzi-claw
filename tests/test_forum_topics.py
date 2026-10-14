@@ -14,7 +14,11 @@ from src.handlers.forum_helper import (
     is_forum_general_chat,
     generate_topic_name,
     format_user_prompt_preview,
+    get_topic_icon_id,
+    FORUM_TOPIC_ICONS,
+    create_forum_topic_with_retry,
 )
+from src.formatters import safe_send, safe_reply
 from src.session_manager import session_manager, SessionState
 
 
@@ -78,6 +82,40 @@ class TestForumTopics(unittest.TestCase):
         # Image
         name_img = generate_topic_name("[Attached Image: /path/img.jpg]\nFix this UI bug")
         self.assertEqual(name_img, "🖼️ Fix this UI bug")
+
+    def test_get_topic_icon_id(self):
+        # Default / plain text
+        self.assertEqual(get_topic_icon_id("Hello there"), FORUM_TOPIC_ICONS["chat"])
+        self.assertEqual(get_topic_icon_id(""), FORUM_TOPIC_ICONS["chat"])
+        self.assertEqual(get_topic_icon_id(None), FORUM_TOPIC_ICONS["chat"])
+
+        # Voice note
+        self.assertEqual(
+            get_topic_icon_id("[Attached Voice Note: /path/voice.ogg]"),
+            FORUM_TOPIC_ICONS["voice"],
+        )
+
+        # Image
+        self.assertEqual(
+            get_topic_icon_id("[Attached Image: /path/img.jpg]"),
+            FORUM_TOPIC_ICONS["image"],
+        )
+
+        # Audio file
+        self.assertEqual(
+            get_topic_icon_id("[Attached Audio File: /path/audio.mp3]"),
+            FORUM_TOPIC_ICONS["audio"],
+        )
+
+        # Document
+        self.assertEqual(
+            get_topic_icon_id("[Attached Document: /path/doc.pdf]"),
+            FORUM_TOPIC_ICONS["document"],
+        )
+
+        # Explicit topic_type
+        self.assertEqual(get_topic_icon_id(topic_type="terminal"), FORUM_TOPIC_ICONS["terminal"])
+        self.assertEqual(get_topic_icon_id(topic_type="command"), FORUM_TOPIC_ICONS["command"])
 
     def test_general_topic_message_creates_new_topic_and_never_replies_to_general(self):
         """Test that a message sent in General topic creates a new topic and never replies to General."""
@@ -166,7 +204,11 @@ class TestForumTopics(unittest.TestCase):
             asyncio.run(handle_message(update, context))
 
         # 1. Topic was created in FORUM_GROUP_ID
-        bot_mock.create_forum_topic.assert_called_once_with(chat_id=-1004330361961, name="💬 Refactor authentication system")
+        bot_mock.create_forum_topic.assert_called_once_with(
+            chat_id=-1004330361961,
+            name="💬 Refactor authentication system",
+            icon_custom_emoji_id="5417915203100613993",
+        )
 
         # 2. Private message received initial status and edited with response
         msg.reply_text.assert_called_once()
@@ -276,6 +318,66 @@ class TestForumTopics(unittest.TestCase):
         # 3. Status was sent to the redirected topic (thread 333)
         bot_mock.send_message.assert_called()
         self.assertEqual(bot_mock.send_message.call_args[1]["message_thread_id"], 333)
+
+    def test_create_forum_topic_with_retry_recovers_from_transient_error(self):
+        """Test that create_forum_topic_with_retry recovers after transient network error."""
+        import httpx
+
+        bot_mock = MagicMock()
+        topic_ok = DummyForumTopic(message_thread_id=123, name="Test Topic")
+        # First call fails with httpx.ConnectError, second succeeds
+        bot_mock.create_forum_topic = AsyncMock(side_effect=[httpx.ConnectError("Connection refused"), topic_ok])
+
+        res = asyncio.run(
+            create_forum_topic_with_retry(
+                bot=bot_mock,
+                chat_id=-1004330361961,
+                name="Test Topic",
+                max_retries=3,
+                initial_delay=0.01,
+            )
+        )
+        self.assertIsNotNone(res)
+        self.assertEqual(res.message_thread_id, 123)
+        self.assertEqual(bot_mock.create_forum_topic.call_count, 2)
+
+    def test_create_forum_topic_with_retry_fails_gracefully(self):
+        """Test that create_forum_topic_with_retry exhausts retries and returns None without raising."""
+        import httpx
+
+        bot_mock = MagicMock()
+        bot_mock.create_forum_topic = AsyncMock(side_effect=httpx.ConnectError("Persistent timeout"))
+
+        res = asyncio.run(
+            create_forum_topic_with_retry(
+                bot=bot_mock,
+                chat_id=-1004330361961,
+                name="Test Topic",
+                max_retries=2,
+                initial_delay=0.01,
+            )
+        )
+        self.assertIsNone(res)
+        self.assertEqual(bot_mock.create_forum_topic.call_count, 2)
+
+    def test_safe_send_recovers_from_network_error(self):
+        """Test that safe_send recovers from transient network errors."""
+        import httpx
+
+        bot_mock = MagicMock()
+        sent_msg = MagicMock()
+        bot_mock.send_message = AsyncMock(side_effect=[httpx.ConnectError("Connection reset"), sent_msg])
+
+        res = asyncio.run(
+            safe_send(
+                bot=bot_mock,
+                chat_id=12345,
+                text="Hello world",
+                max_retries=3,
+            )
+        )
+        self.assertEqual(res, sent_msg)
+        self.assertEqual(bot_mock.send_message.call_count, 2)
 
 
 if __name__ == "__main__":
