@@ -64,10 +64,15 @@ class TestForumTopics(unittest.TestCase):
         self.assertFalse(is_forum_general_chat(group_chat, msg_gen1))
 
     def test_generate_topic_name(self):
-        # Short text
-        name1 = generate_topic_name("Deploy application to production")
-        self.assertTrue(name1.startswith("💬 Deploy application to production"))
-        self.assertLessEqual(len(name1), 128)
+        # Neutral text -> default chat icon
+        name_neutral = generate_topic_name("Olá como vai você")
+        self.assertTrue(name_neutral.startswith("💬 Olá como vai você"))
+        self.assertLessEqual(len(name_neutral), 128)
+
+        # Code / dev text -> computer icon
+        name_code = generate_topic_name("Deploy application to production")
+        self.assertTrue(name_code.startswith("💻 Deploy application to production"))
+        self.assertLessEqual(len(name_code), 128)
 
         # Long text truncated
         long_prompt = "A" * 200
@@ -75,27 +80,48 @@ class TestForumTopics(unittest.TestCase):
         self.assertLessEqual(len(name2), 128)
         self.assertTrue(name2.endswith("..."))
 
-        # Voice note
+        # Voice note with user note (semantic detection on note)
         name_voice = generate_topic_name("[Attached Voice Note: /path/voice.ogg]\nUser's note: Deploy script")
-        self.assertEqual(name_voice, "🎙️ Deploy script")
+        self.assertEqual(name_voice, "💻 Deploy script")
 
-        # Image
+        # Voice note without user note
+        name_voice_raw = generate_topic_name("[Attached Voice Note: /path/voice.ogg]")
+        self.assertTrue(name_voice_raw.startswith("🎙️ Áudio"))
+
+        # Image with note
         name_img = generate_topic_name("[Attached Image: /path/img.jpg]\nFix this UI bug")
-        self.assertEqual(name_img, "🖼️ Fix this UI bug")
+        self.assertEqual(name_img, "💻 Fix this UI bug")
+
+        # Image without note
+        name_img_raw = generate_topic_name("[Attached Image: /path/img.jpg]")
+        self.assertTrue(name_img_raw.startswith("🖼️ Imagem"))
 
     def test_get_topic_icon_id(self):
-        # Default / plain text
+        # Default / neutral text -> chat icon
         self.assertEqual(get_topic_icon_id("Hello there"), FORUM_TOPIC_ICONS["chat"])
         self.assertEqual(get_topic_icon_id(""), FORUM_TOPIC_ICONS["chat"])
         self.assertEqual(get_topic_icon_id(None), FORUM_TOPIC_ICONS["chat"])
 
-        # Voice note
+        # Semantic keywords detection
+        self.assertEqual(get_topic_icon_id("Deploy python script to server"), FORUM_TOPIC_ICONS["code"])
+        self.assertEqual(get_topic_icon_id("Quanto está a cotação do dólar hoje?"), FORUM_TOPIC_ICONS["money"])
+        self.assertEqual(get_topic_icon_id("Baixar novo episódio de Dexter"), FORUM_TOPIC_ICONS["video"])
+        self.assertEqual(get_topic_icon_id("Pesquisar novidades sobre Gemini e LLMs"), FORUM_TOPIC_ICONS["ai"])
+        self.assertEqual(get_topic_icon_id("Agenda reunião amanhã às 14h"), FORUM_TOPIC_ICONS["calendar"])
+
+        # Voice note without note -> voice icon
         self.assertEqual(
             get_topic_icon_id("[Attached Voice Note: /path/voice.ogg]"),
             FORUM_TOPIC_ICONS["voice"],
         )
 
-        # Image
+        # Voice note with note -> semantic detection
+        self.assertEqual(
+            get_topic_icon_id("[Attached Voice Note: /path/voice.ogg]\nUser's note: Deploy script"),
+            FORUM_TOPIC_ICONS["code"],
+        )
+
+        # Image without caption -> image icon
         self.assertEqual(
             get_topic_icon_id("[Attached Image: /path/img.jpg]"),
             FORUM_TOPIC_ICONS["image"],
@@ -107,9 +133,15 @@ class TestForumTopics(unittest.TestCase):
             FORUM_TOPIC_ICONS["audio"],
         )
 
-        # Document
+        # Document: python script -> code
         self.assertEqual(
-            get_topic_icon_id("[Attached Document: /path/doc.pdf]"),
+            get_topic_icon_id("[Attached Document: /path/doc_123_main.py (Use view_file)]"),
+            FORUM_TOPIC_ICONS["code"],
+        )
+
+        # Document: generic -> document
+        self.assertEqual(
+            get_topic_icon_id("[Attached Document: /path/doc_123_notes.txt (Use view_file)]"),
             FORUM_TOPIC_ICONS["document"],
         )
 
@@ -378,6 +410,64 @@ class TestForumTopics(unittest.TestCase):
         )
         self.assertEqual(res, sent_msg)
         self.assertEqual(bot_mock.send_message.call_count, 2)
+
+
+    def test_private_chat_reuses_and_renames_existing_topic_from_new(self):
+        """Test that if a forum topic was already pre-created (e.g. by /new), the first message renames it rather than creating a duplicate."""
+        from src.handlers.chat import handle_message
+
+        chat = MagicMock(type="private", is_forum=False, id=740821374)
+        msg = MagicMock(text="Você está bem?", message_thread_id=None, is_topic_message=False)
+        private_status_msg = MagicMock()
+        private_status_msg.edit_text = AsyncMock()
+        msg.reply_text = AsyncMock(return_value=private_status_msg)
+        msg.photo = []
+        msg.voice = None
+        msg.audio = None
+        msg.document = None
+
+        user = DummyUser(740821374, username="andreusd")
+        update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
+
+        # Pre-set session as if /new was called: forum_topic_id is set, conversation_id is None
+        session = session_manager.get_session(740821374, None)
+        session.forum_topic_id = 555
+        session.conversation_id = None
+        session_manager.save_session(session)
+
+        bot_mock = MagicMock()
+        bot_mock.create_forum_topic = AsyncMock()
+        bot_mock.edit_forum_topic = AsyncMock(return_value=True)
+        bot_mock.send_message = AsyncMock()
+
+        context = MagicMock(bot=bot_mock)
+
+        with patch("src.auth.is_user_authorized", return_value=True), \
+             patch("src.handlers.chat.FORUM_GROUP_ID", -1004330361961), \
+             patch("src.antigravity_runner.AntigravityRunner.run", new_callable=AsyncMock) as mock_runner_run:
+            mock_runner_run.return_value = {
+                "status": "SUCCESS",
+                "response": "Tudo ótimo!",
+                "conversation_id": "conv-123",
+            }
+
+            asyncio.run(handle_message(update, context))
+
+        # 1. create_forum_topic MUST NOT be called!
+        bot_mock.create_forum_topic.assert_not_called()
+
+        # 2. edit_forum_topic MUST be called to rename the pre-existing topic 555
+        bot_mock.edit_forum_topic.assert_called_once()
+        self.assertEqual(bot_mock.edit_forum_topic.call_args[1]["chat_id"], -1004330361961)
+        self.assertEqual(bot_mock.edit_forum_topic.call_args[1]["message_thread_id"], 555)
+        self.assertIn("Você está bem?", bot_mock.edit_forum_topic.call_args[1]["name"])
+
+        # 3. Response was sent to topic 555
+        topic_send_calls = [
+            c for c in bot_mock.send_message.call_args_list
+            if c[1].get("message_thread_id") == 555
+        ]
+        self.assertGreaterEqual(len(topic_send_calls), 1)
 
 
 if __name__ == "__main__":

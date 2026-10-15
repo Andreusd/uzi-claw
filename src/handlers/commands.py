@@ -14,10 +14,12 @@ from ..session_manager import session_manager, SessionState
 from ..formatters import safe_reply, safe_send, safe_edit, format_usage_data
 from ..antigravity_runner import get_usage
 from ..device_stats import format_device_stats
+from ..scheduler import scheduler_service
 from .forum_helper import (
     is_forum_general_chat,
     FORUM_TOPIC_ICONS,
     create_forum_topic_with_retry,
+    unpin_topic_messages_quietly,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,7 +52,9 @@ def general_topic_redirect(func):
             orig_reply = msg.reply_text
             async def redirected_reply(*r_args, **r_kwargs):
                 r_kwargs["message_thread_id"] = target_thread
-                return await context.bot.send_message(chat_id=chat.id, *r_args, **r_kwargs)
+                sent = await context.bot.send_message(chat_id=chat.id, *r_args, **r_kwargs)
+                await unpin_topic_messages_quietly(context.bot, chat.id, target_thread)
+                return sent
             msg.reply_text = redirected_reply
             try:
                 return await func(update, context, *args, **kwargs)
@@ -265,6 +269,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Envie sua mensagem ou prompt diretamente aqui neste tópico."
         )
         await safe_send(context.bot, chat.id, welcome_text, thread_id=target_thread_id)
+        await unpin_topic_messages_quietly(context.bot, chat.id, target_thread_id)
         return
 
     # 2. In Private DM:
@@ -313,6 +318,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "✨ **Nova conversa iniciada via chat privado.** Envie suas mensagens no privado ou aqui neste tópico.",
                 thread_id=topic.message_thread_id,
             )
+            await unpin_topic_messages_quietly(context.bot, FORUM_GROUP_ID, topic.message_thread_id)
         return
 
     # 3. Inside an existing forum topic (not General):
@@ -350,7 +356,6 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @restricted
-@general_topic_redirect
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Cancel currently executing command/turn."""
     msg = update.effective_message
@@ -358,6 +363,8 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     session = get_session_from_update(update)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    raw_thread_id = getattr(msg, "message_thread_id", None) if msg else None
 
     had_queued = session.queued_count > 0
     if had_queued:
@@ -382,6 +389,12 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             cancelled_any = True
     session.background_runners.clear()
 
+    # Also check and cancel active scheduled tasks for this chat / thread
+    if chat_id:
+        cancelled_scheds = await scheduler_service.cancel_active_jobs_for_chat(chat_id, raw_thread_id)
+        if cancelled_scheds:
+            cancelled_any = True
+
     if cancelled_any:
         extra = " and cleared queued messages." if had_queued else "."
         await safe_reply(msg, f"⏹️ Sent cancellation request to active agent process{extra}")
@@ -401,7 +414,6 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 @restricted
-@general_topic_redirect
 async def cmd_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Interrupt currently executing prompt (equivalent to pressing Esc in agy CLI / sending SIGINT)."""
     msg = update.effective_message
@@ -409,6 +421,8 @@ async def cmd_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     session = get_session_from_update(update)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    raw_thread_id = getattr(msg, "message_thread_id", None) if msg else None
 
     if session.terminal_runner.is_running:
         success = await session.terminal_runner.interrupt()
@@ -420,6 +434,18 @@ async def cmd_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         success = await session.runner.interrupt()
         if success:
             await safe_reply(msg, "⏹️ Interrupted active prompt (Esc / SIGINT sent to `agy`).")
+            return
+
+    for bg_runner in list(session.background_runners):
+        if bg_runner.is_running:
+            await bg_runner.interrupt()
+            await safe_reply(msg, "⏹️ Interrupted active prompt (Esc / SIGINT sent to `agy`).")
+            return
+
+    if chat_id:
+        cancelled_scheds = await scheduler_service.cancel_active_jobs_for_chat(chat_id, raw_thread_id)
+        if cancelled_scheds:
+            await safe_reply(msg, f"⏹️ Interrupted active scheduled task(s) (#{', #'.join(map(str, cancelled_scheds))}).")
             return
 
     if session.is_busy:

@@ -464,9 +464,10 @@ def format_usage_data(usage_data: dict) -> str:
 class RateLimitedMessageUpdater:
     """Helper to update a Telegram status message without exceeding rate limits."""
 
-    def __init__(self, message: Message, min_interval: float = 1.5):
+    def __init__(self, message: Message, min_interval: float = 1.5, reply_markup: Optional[Any] = None):
         self.message = message
         self.min_interval = min_interval
+        self.reply_markup = reply_markup
         self.last_update_time = time.time()
         self.last_text = message.text or ""
         self._lock = asyncio.Lock()
@@ -494,14 +495,14 @@ class RateLimitedMessageUpdater:
                         else formatted_text[: TELEGRAM_MAX_LENGTH - 10] + "..."
                     )
                     edit_text = sanitize_and_balance_html(edit_text)
-                    await self.message.edit_text(edit_text, parse_mode="HTML")
+                    await self.message.edit_text(edit_text, parse_mode="HTML", reply_markup=self.reply_markup)
                 else:
                     edit_text = (
                         text
                         if len(text) <= TELEGRAM_MAX_LENGTH
                         else text[: TELEGRAM_MAX_LENGTH - 10] + "..."
                     )
-                    await self.message.edit_text(edit_text, parse_mode=parse_mode)
+                    await self.message.edit_text(edit_text, parse_mode=parse_mode, reply_markup=self.reply_markup)
 
                 self.last_text = text
                 self.last_update_time = time.time()
@@ -517,7 +518,7 @@ class RateLimitedMessageUpdater:
                             if len(text) <= TELEGRAM_MAX_LENGTH
                             else text[: TELEGRAM_MAX_LENGTH - 10] + "..."
                         )
-                        await self.message.edit_text(plain_text, parse_mode=None)
+                        await self.message.edit_text(plain_text, parse_mode=None, reply_markup=self.reply_markup)
                         self.last_text = text
                         self.last_update_time = time.time()
                         return True

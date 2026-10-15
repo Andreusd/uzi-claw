@@ -13,7 +13,7 @@ from typing import Optional, List, Dict, Any
 
 from croniter import croniter
 
-from .config import SCHEDULES_DB_PATH, SCHEDULE_CHECK_INTERVAL, INJECT_TELEGRAM_CONTEXT
+from .config import SCHEDULES_DB_PATH, SCHEDULE_CHECK_INTERVAL, INJECT_TELEGRAM_CONTEXT, FORUM_GROUP_ID
 from .formatters import split_message, safe_reply, safe_send, safe_edit, RateLimitedMessageUpdater, LiveStatusTracker
 from .antigravity_runner import AntigravityRunner
 
@@ -33,6 +33,7 @@ class Schedule:
     created_at: float
     status: str         # "active" | "completed" | "cancelled"
     target_cwd: Optional[str] = None
+    forum_topic_id: Optional[int] = None
 
     def is_active(self) -> bool:
         return self.status == "active"
@@ -166,13 +167,19 @@ class ScheduleStore:
                     last_run REAL,
                     created_at REAL NOT NULL,
                     status TEXT NOT NULL DEFAULT 'active',
-                    target_cwd TEXT
+                    target_cwd TEXT,
+                    forum_topic_id INTEGER
                 );
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_schedules_next_run 
                 ON schedules(status, next_run);
             """)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(schedules)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if "forum_topic_id" not in cols:
+                conn.execute("ALTER TABLE schedules ADD COLUMN forum_topic_id INTEGER;")
 
     def add_schedule(
         self,
@@ -182,6 +189,7 @@ class ScheduleStore:
         expression: str,
         human_desc: str = "",
         target_cwd: Optional[str] = None,
+        forum_topic_id: Optional[int] = None,
     ) -> Schedule:
         """Add and persist a new schedule."""
         now = time.time()
@@ -201,8 +209,8 @@ class ScheduleStore:
                 """
                 INSERT INTO schedules (
                     chat_id, prompt, schedule_type, expression, human_desc,
-                    next_run, last_run, created_at, status, target_cwd
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    next_run, last_run, created_at, status, target_cwd, forum_topic_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -215,6 +223,7 @@ class ScheduleStore:
                     now,
                     "active",
                     target_cwd,
+                    forum_topic_id,
                 ),
             )
             sched_id = cursor.lastrowid
@@ -231,11 +240,12 @@ class ScheduleStore:
             created_at=now,
             status="active",
             target_cwd=target_cwd,
+            forum_topic_id=forum_topic_id,
         )
 
     def list_schedules(self, chat_id: Optional[int] = None, status: Optional[str] = "active") -> List[Schedule]:
         """List schedules filtered optionally by chat_id and status."""
-        query = "SELECT id, chat_id, prompt, schedule_type, expression, human_desc, next_run, last_run, created_at, status, target_cwd FROM schedules WHERE 1=1"
+        query = "SELECT id, chat_id, prompt, schedule_type, expression, human_desc, next_run, last_run, created_at, status, target_cwd, forum_topic_id FROM schedules WHERE 1=1"
         params: List[Any] = []
 
         if chat_id is not None:
@@ -266,6 +276,7 @@ class ScheduleStore:
                         created_at=row[8],
                         status=row[9],
                         target_cwd=row[10],
+                        forum_topic_id=row[11] if len(row) > 11 else None,
                     )
                 )
         return results
@@ -275,7 +286,7 @@ class ScheduleStore:
         with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, chat_id, prompt, schedule_type, expression, human_desc, next_run, last_run, created_at, status, target_cwd FROM schedules WHERE id = ?",
+                "SELECT id, chat_id, prompt, schedule_type, expression, human_desc, next_run, last_run, created_at, status, target_cwd, forum_topic_id FROM schedules WHERE id = ?",
                 (schedule_id,),
             )
             row = cursor.fetchone()
@@ -293,6 +304,16 @@ class ScheduleStore:
                 created_at=row[8],
                 status=row[9],
                 target_cwd=row[10],
+                forum_topic_id=row[11] if len(row) > 11 else None,
+            )
+
+    def update_schedule_topic(self, schedule_id: int, forum_topic_id: int) -> None:
+        """Update the forum topic ID associated with a schedule."""
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE schedules SET forum_topic_id = ? WHERE id = ?",
+                (forum_topic_id, schedule_id),
             )
 
     def cancel_schedule(self, schedule_id: int, chat_id: Optional[int] = None) -> bool:
@@ -342,7 +363,7 @@ class ScheduleStore:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT id, chat_id, prompt, schedule_type, expression, human_desc, next_run, last_run, created_at, status, target_cwd
+                SELECT id, chat_id, prompt, schedule_type, expression, human_desc, next_run, last_run, created_at, status, target_cwd, forum_topic_id
                 FROM schedules
                 WHERE status = 'active' AND next_run <= ?
                 ORDER BY next_run ASC
@@ -364,6 +385,7 @@ class ScheduleStore:
                         created_at=row[8],
                         status=row[9],
                         target_cwd=row[10],
+                        forum_topic_id=row[11] if len(row) > 11 else None,
                     )
                 )
             return results
@@ -383,6 +405,7 @@ class SchedulerService:
         self._bot = None
         self._session_manager = None
         self._active_runners: Dict[int, AntigravityRunner] = {}
+        self._active_job_threads: Dict[int, tuple[int, Optional[int]]] = {}
 
     def create_runner(self) -> AntigravityRunner:
         """Create a dedicated AntigravityRunner instance for background task isolation."""
@@ -393,8 +416,21 @@ class SchedulerService:
         runner = self._active_runners.get(schedule_id)
         if runner and runner.is_running:
             logger.info("Cancelling active background runner for schedule #%d", schedule_id)
-            return await runner.cancel()
+            res = await runner.cancel()
+            self._active_runners.pop(schedule_id, None)
+            self._active_job_threads.pop(schedule_id, None)
+            return res
         return False
+
+    async def cancel_active_jobs_for_chat(self, chat_id: int, thread_id: Optional[int] = None) -> list[int]:
+        """Cancel active background scheduled jobs matching chat_id and optional thread_id."""
+        cancelled = []
+        for sched_id, (c_id, t_id) in list(self._active_job_threads.items()):
+            if c_id == chat_id:
+                if thread_id is None or thread_id <= 1 or t_id == thread_id:
+                    if await self.cancel_running_job(sched_id):
+                        cancelled.append(sched_id)
+        return cancelled
 
     def start(self, bot, session_manager) -> None:
         """Start the background scheduler task."""
@@ -425,6 +461,7 @@ class SchedulerService:
                 except Exception:
                     pass
         self._active_runners.clear()
+        self._active_job_threads.clear()
         logger.info("SchedulerService stopped.")
 
     async def _run_loop(self) -> None:
@@ -453,7 +490,7 @@ class SchedulerService:
             asyncio.create_task(self.execute_job(job))
 
     async def execute_job(self, job: Schedule, is_manual: bool = False, runner: Optional[AntigravityRunner] = None) -> None:
-        """Execute a single scheduled job using an isolated runner, without locking user session."""
+        """Execute a single scheduled job using an isolated runner, in a dedicated forum topic if in a forum supergroup."""
         logger.info("Executing scheduled job #%d (%s): %s", job.id, job.human_desc, job.prompt)
 
         # 1. Update schedule state immediately to avoid double firing
@@ -468,7 +505,48 @@ class SchedulerService:
             logger.error("SchedulerService bot or session_manager not initialized.")
             return
 
-        session = self._session_manager.get_session(job.chat_id)
+        # Determine target thread / topic
+        target_thread_id: Optional[int] = job.forum_topic_id
+
+        # If running in forum supergroup and no topic is set, create a dedicated forum topic
+        is_forum_chat = False
+        if FORUM_GROUP_ID and job.chat_id == FORUM_GROUP_ID:
+            is_forum_chat = True
+        elif self._bot:
+            try:
+                chat_obj = await self._bot.get_chat(job.chat_id)
+                if getattr(chat_obj, "is_forum", False):
+                    is_forum_chat = True
+            except Exception:
+                pass
+
+        if is_forum_chat and target_thread_id is None:
+            try:
+                from .handlers.forum_helper import (
+                    create_forum_topic_with_retry,
+                    generate_topic_name,
+                    get_topic_icon_id,
+                    unpin_topic_messages_quietly,
+                )
+                topic_name = generate_topic_name(
+                    job.human_desc or job.prompt,
+                    default_prefix=f"⏰ Tarefa #{job.id}",
+                )
+                icon_id = get_topic_icon_id(job.human_desc or job.prompt)
+                topic = await create_forum_topic_with_retry(
+                    bot=self._bot,
+                    chat_id=job.chat_id,
+                    name=topic_name,
+                    icon_custom_emoji_id=icon_id,
+                )
+                if topic and hasattr(topic, "message_thread_id"):
+                    target_thread_id = topic.message_thread_id
+                    self.store.update_schedule_topic(job.id, target_thread_id)
+                    await unpin_topic_messages_quietly(self._bot, job.chat_id, target_thread_id)
+            except Exception as e:
+                logger.error("Failed to create dedicated forum topic for scheduled job #%d: %s", job.id, e)
+
+        session = self._session_manager.get_session(job.chat_id, target_thread_id) if self._session_manager else None
         tag = "[Manual Trigger]" if is_manual else "[Agendado]"
 
         # Read environment settings from session without locking or mutating session.runner/is_busy
@@ -479,6 +557,14 @@ class SchedulerService:
 
         job_runner = runner or self.create_runner()
         self._active_runners[job.id] = job_runner
+        self._active_job_threads[job.id] = (job.chat_id, target_thread_id)
+        if session:
+            session.background_runners.append(job_runner)
+
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        cancel_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"⏹️ Cancelar Tarefa #{job.id}", callback_data=f"sched_cancel_job:{job.id}")]
+        ])
 
         # Notify Telegram that the scheduled task actually started
         status_text = f"⏰ *{tag} Tarefa #{job.id} Iniciada:*\n_{job.human_desc or job.prompt}_\n\n⏳ Executando..."
@@ -486,6 +572,8 @@ class SchedulerService:
             self._bot,
             chat_id=job.chat_id,
             text=status_text,
+            thread_id=target_thread_id,
+            reply_markup=cancel_markup,
             parse_mode="HTML",
         )
 
@@ -497,7 +585,7 @@ class SchedulerService:
             f"{job.prompt}"
         )
 
-        updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
+        updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5, reply_markup=cancel_markup) if status_msg else None
         tracker = LiveStatusTracker(
             updater,
             header=f"⏰ *{tag} Tarefa #{job.id}:*\n_{job.human_desc or job.prompt}_\n",
@@ -535,22 +623,28 @@ class SchedulerService:
             # Send final result
             chunks = split_message(final_text)
             if status_msg and chunks:
-                await safe_edit(status_msg, chunks[0], parse_mode="HTML")
+                await safe_edit(status_msg, chunks[0], parse_mode="HTML", reply_markup=None)
                 for chunk in chunks[1:]:
-                    await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="HTML")
+                    await safe_send(self._bot, chat_id=job.chat_id, text=chunk, thread_id=target_thread_id, parse_mode="HTML")
             else:
                 for chunk in chunks:
-                    await safe_send(self._bot, chat_id=job.chat_id, text=chunk, parse_mode="HTML")
+                    await safe_send(self._bot, chat_id=job.chat_id, text=chunk, thread_id=target_thread_id, parse_mode="HTML")
 
         except Exception as e:
             logger.error("Exception during scheduled task execution #%d: %s", job.id, e, exc_info=True)
             err_text = f"❌ *[Tarefa #{job.id} Erro]*: `{e}`"
             if status_msg:
-                await safe_edit(status_msg, err_text, parse_mode="HTML")
+                await safe_edit(status_msg, err_text, parse_mode="HTML", reply_markup=None)
             else:
-                await safe_send(self._bot, chat_id=job.chat_id, text=err_text, parse_mode="HTML")
+                await safe_send(self._bot, chat_id=job.chat_id, text=err_text, thread_id=target_thread_id, parse_mode="HTML")
         finally:
             self._active_runners.pop(job.id, None)
+            self._active_job_threads.pop(job.id, None)
+            if session and job_runner in session.background_runners:
+                try:
+                    session.background_runners.remove(job_runner)
+                except ValueError:
+                    pass
 
 
 scheduler_service = SchedulerService()

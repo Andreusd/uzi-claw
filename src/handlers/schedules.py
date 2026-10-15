@@ -233,3 +233,16 @@ async def handle_schedule_callback(update: Update, context: ContextTypes.DEFAULT
             if schedule and query.message:
                 await safe_reply(query.message, f"▶️ Disparando agendamento **#{sched_id}** manualmente...")
                 asyncio.create_task(scheduler_service.execute_job(schedule, is_manual=True))
+
+    elif data.startswith("sched_cancel_job:"):
+        sched_id_str = data.split(":", 1)[1]
+        if sched_id_str.isdigit():
+            sched_id = int(sched_id_str)
+            cancelled = await scheduler_service.cancel_running_job(sched_id)
+            if cancelled:
+                await query.answer("⏹️ Cancelando execução da tarefa...")
+                if query.message:
+                    from ..formatters import safe_edit
+                    await safe_edit(query.message, f"⏹️ <b>[Tarefa #{sched_id}]</b> Execução cancelada pelo usuário.", parse_mode="HTML", reply_markup=None)
+            else:
+                await query.answer("A tarefa já finalizou ou não está em execução.")

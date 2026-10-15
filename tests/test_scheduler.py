@@ -295,6 +295,83 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
         res_nonexistent = await service.cancel_running_job(999)
         self.assertFalse(res_nonexistent)
 
+    async def test_scheduler_service_creates_forum_topic_in_forum_supergroup(self):
+        """Verify execute_job creates dedicated topic when running in FORUM_GROUP_ID."""
+        from src.config import FORUM_GROUP_ID
+        chat_id = FORUM_GROUP_ID if FORUM_GROUP_ID else -1004330361961
+
+        job = self.store.add_schedule(
+            chat_id=chat_id,
+            prompt="Baixar VisionQuest S01E01",
+            schedule_type="once",
+            expression="1s",
+            human_desc="VisionQuest Download",
+        )
+        self.assertIsNone(job.forum_topic_id)
+
+        service = SchedulerService(store=self.store, check_interval=1)
+        mock_status_msg = MagicMock()
+        mock_status_msg.edit_text = AsyncMock()
+        mock_bot = MagicMock()
+        mock_bot.send_message = AsyncMock(return_value=mock_status_msg)
+
+        mock_topic = MagicMock()
+        mock_topic.message_thread_id = 777
+
+        mock_session = MagicMock()
+        mock_session.lock = asyncio.Lock()
+        mock_session.cwd = "/tmp"
+        mock_session.mode = None
+        mock_session.model = None
+        mock_session.effort = None
+        mock_session.background_runners = []
+
+        mock_isolated_runner = MagicMock()
+        mock_isolated_runner.run = AsyncMock(return_value={"status": "SUCCESS", "response": "Downloaded"})
+        mock_isolated_runner.is_running = False
+        service.create_runner = MagicMock(return_value=mock_isolated_runner)
+
+        mock_session_manager = MagicMock()
+        mock_session_manager.get_session.return_value = mock_session
+
+        service._bot = mock_bot
+        service._session_manager = mock_session_manager
+
+        with patch("src.config.FORUM_GROUP_ID", chat_id), \
+             patch("src.handlers.forum_helper.create_forum_topic_with_retry", AsyncMock(return_value=mock_topic)) as mock_create_topic, \
+             patch("src.handlers.forum_helper.unpin_topic_messages_quietly", AsyncMock()):
+            await service.execute_job(job)
+
+            mock_create_topic.assert_called_once()
+            # Verify status message sent with message_thread_id=777
+            self.assertEqual(mock_bot.send_message.call_args[1].get("message_thread_id"), 777)
+            # Verify schedule store was updated with forum_topic_id
+            updated = self.store.get_schedule(job.id)
+            self.assertEqual(updated.forum_topic_id, 777)
+
+    async def test_cancel_active_jobs_for_chat(self):
+        """Verify cancel_active_jobs_for_chat cancels runners matching chat and thread."""
+        service = SchedulerService(store=self.store, check_interval=1)
+        runner1 = MagicMock(is_running=True, cancel=AsyncMock(return_value=True))
+        runner2 = MagicMock(is_running=True, cancel=AsyncMock(return_value=True))
+
+        service._active_runners[10] = runner1
+        service._active_job_threads[10] = (12345, 555)
+
+        service._active_runners[20] = runner2
+        service._active_job_threads[20] = (12345, 999)
+
+        # Cancel thread 555
+        cancelled = await service.cancel_active_jobs_for_chat(12345, 555)
+        self.assertEqual(cancelled, [10])
+        runner1.cancel.assert_called_once()
+        runner2.cancel.assert_not_called()
+
+        # Cancel chat 12345 (thread None cancels all in that chat)
+        cancelled_all = await service.cancel_active_jobs_for_chat(12345, None)
+        self.assertEqual(cancelled_all, [20])
+        runner2.cancel.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

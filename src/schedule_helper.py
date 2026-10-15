@@ -15,6 +15,7 @@ from src.scheduler import schedule_store, format_timestamp, compute_next_run
 
 def cmd_add(args: argparse.Namespace) -> int:
     try:
+        target_topic = getattr(args, "topic_id", None) or getattr(args, "thread_id", None)
         schedule = schedule_store.add_schedule(
             chat_id=args.chat_id,
             prompt=args.prompt,
@@ -22,11 +23,13 @@ def cmd_add(args: argparse.Namespace) -> int:
             expression=args.expr,
             human_desc=args.desc or "",
             target_cwd=args.cwd or None,
+            forum_topic_id=target_topic,
         )
         out = {
             "status": "success",
             "id": schedule.id,
             "chat_id": schedule.chat_id,
+            "topic_id": schedule.forum_topic_id,
             "type": schedule.schedule_type,
             "expression": schedule.expression,
             "human_desc": schedule.human_desc,
@@ -136,6 +139,7 @@ def main() -> None:
     p_add.add_argument("--expr", type=str, required=True, help="Cron expression or offset/datetime")
     p_add.add_argument("--desc", type=str, default="", help="Human friendly description")
     p_add.add_argument("--cwd", type=str, default="", help="Target working directory")
+    p_add.add_argument("--topic-id", "--thread-id", dest="topic_id", type=int, default=None, help="Target forum topic / thread ID")
 
     # LIST
     p_list = subparsers.add_parser("list", parents=[common_parent], help="List schedules")

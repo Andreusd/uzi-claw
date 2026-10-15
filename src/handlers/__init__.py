@@ -40,6 +40,11 @@ from .forum_helper import (
     is_forum_general_chat,
     generate_topic_name,
     format_user_prompt_preview,
+    detect_topic_icon_from_prompt,
+    get_topic_icon_id,
+    edit_forum_topic_with_retry,
+    unpin_topic_messages_quietly,
+    FORUM_TOPIC_ICONS,
 )
 
 __all__ = [
@@ -76,4 +81,9 @@ __all__ = [
     "is_forum_general_chat",
     "generate_topic_name",
     "format_user_prompt_preview",
+    "detect_topic_icon_from_prompt",
+    "get_topic_icon_id",
+    "edit_forum_topic_with_retry",
+    "unpin_topic_messages_quietly",
+    "FORUM_TOPIC_ICONS",
 ]

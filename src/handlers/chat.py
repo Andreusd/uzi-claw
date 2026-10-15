@@ -26,8 +26,11 @@ from .forum_helper import (
     generate_topic_name,
     format_user_prompt_preview,
     get_topic_icon_id,
+    detect_topic_icon_from_prompt,
     FORUM_TOPIC_ICONS,
     create_forum_topic_with_retry,
+    edit_forum_topic_with_retry,
+    unpin_topic_messages_quietly,
 )
 
 logger = logging.getLogger(__name__)
@@ -216,6 +219,9 @@ async def _handle_general_forum_message(update: Update, context: ContextTypes.DE
     # Post initial status message in the new topic
     status_msg = await safe_send(context.bot, chat.id, init_status, thread_id=target_thread_id)
 
+    # Automatically unpin any messages pinned by default in the new topic
+    await unpin_topic_messages_quietly(context.bot, chat.id, target_thread_id)
+
     # Run agent turn inside the topic
     acquired = False
     my_gen = session.queue_generation
@@ -296,6 +302,28 @@ async def _handle_general_forum_message(update: Update, context: ContextTypes.DE
 
                 for chunk in chunks[1:]:
                     await safe_send(context.bot, chat.id, chunk, thread_id=target_thread_id)
+
+                # If topic was initially created with generic voice placeholder, refine with detected icon & topic
+                if topic_name.startswith("🎙️ Áudio") and response_text:
+                    try:
+                        em, refined_icon_id = detect_topic_icon_from_prompt(response_text)
+                        cand_lines = [l.strip() for l in clean_prompt_for_display(response_text).splitlines() if l.strip() and not l.strip().startswith(("#", "-", "*", ">"))]
+                        first_cand = cand_lines[0] if cand_lines else ""
+                        first_cand = re.sub(r"[*_`#~\[\]\(\)]", "", first_cand).strip()
+                        first_cand = re.sub(r"^([0-9]+\.|\-|\*)\s*", "", first_cand).strip()
+                        if first_cand:
+                            refined_title = f"{em} {first_cand}"
+                            if len(refined_title) > 120:
+                                refined_title = refined_title[:117] + "..."
+                            await edit_forum_topic_with_retry(
+                                bot=context.bot,
+                                chat_id=chat.id,
+                                message_thread_id=target_thread_id,
+                                name=refined_title[:128],
+                                icon_custom_emoji_id=refined_icon_id,
+                            )
+                    except Exception as ex:
+                        logger.debug("Failed to auto-refine voice topic: %s", ex)
             finally:
                 if session.runner is current_runner:
                     session.is_busy = False
@@ -335,6 +363,7 @@ async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT
         session.cancel_requested = False
         try:
             status_msg = await safe_send(context.bot, chat.id, f"💻 `$ {cmd_preview}`\n⏳ _Running..._", thread_id=target_thread_id)
+            await unpin_topic_messages_quietly(context.bot, chat.id, target_thread_id)
             result = await session.terminal_runner.run(command=command, cwd=session.cwd)
             if result.get("new_cwd"):
                 session.cwd = result["new_cwd"]
@@ -481,9 +510,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 # If in private chat, ensure linked forum topic in FORUM_GROUP_ID
                 if is_private and FORUM_GROUP_ID:
-                    if session.forum_topic_id is None or session.conversation_id is None:
-                        topic_name = generate_topic_name(prompt_text)
-                        icon_id = get_topic_icon_id(prompt_text)
+                    topic_name = generate_topic_name(prompt_text)
+                    icon_id = get_topic_icon_id(prompt_text)
+
+                    if session.forum_topic_id is None:
                         topic = await create_forum_topic_with_retry(
                             bot=context.bot,
                             chat_id=FORUM_GROUP_ID,
@@ -494,13 +524,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         if target_tid is not None:
                             session.forum_topic_id = target_tid
                             session_manager.save_session(session)
+                    elif session.conversation_id is None:
+                        # Topic was pre-created (e.g. by /new with placeholder name); rename it to match prompt
+                        await edit_forum_topic_with_retry(
+                            bot=context.bot,
+                            chat_id=FORUM_GROUP_ID,
+                            message_thread_id=session.forum_topic_id,
+                            name=topic_name,
+                            icon_custom_emoji_id=icon_id,
+                        )
 
                     if session.forum_topic_id:
                         try:
                             preview = format_user_prompt_preview(msg, prompt_text, origin="PV")
                             await safe_send(context.bot, FORUM_GROUP_ID, preview, thread_id=session.forum_topic_id)
+                            await unpin_topic_messages_quietly(context.bot, FORUM_GROUP_ID, session.forum_topic_id)
                         except Exception as e:
-                            logger.debug("Failed to send preview to linked topic: %s", e)
+                            logger.debug("Failed to send preview or unpin linked topic: %s", e)
 
                 if session.cancel_requested:
                     session.cancel_requested = False
@@ -611,6 +651,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         session_manager.save_session(topic_session)
                     except Exception as e:
                         logger.debug("Failed to sync forum topic session: %s", e)
+
+                    if prompt_text.startswith("[Attached Voice Note:") and response_text:
+                        try:
+                            em, refined_icon_id = detect_topic_icon_from_prompt(response_text)
+                            cand_lines = [l.strip() for l in clean_prompt_for_display(response_text).splitlines() if l.strip() and not l.strip().startswith(("#", "-", "*", ">"))]
+                            first_cand = cand_lines[0] if cand_lines else ""
+                            first_cand = re.sub(r"[*_`#~\[\]\(\)]", "", first_cand).strip()
+                            first_cand = re.sub(r"^([0-9]+\.|\-|\*)\s*", "", first_cand).strip()
+                            if first_cand:
+                                refined_title = f"{em} {first_cand}"
+                                if len(refined_title) > 120:
+                                    refined_title = refined_title[:117] + "..."
+                                await edit_forum_topic_with_retry(
+                                    bot=context.bot,
+                                    chat_id=FORUM_GROUP_ID,
+                                    message_thread_id=session.forum_topic_id,
+                                    name=refined_title[:128],
+                                    icon_custom_emoji_id=refined_icon_id,
+                                )
+                        except Exception as ex:
+                            logger.debug("Failed to auto-refine linked voice topic: %s", ex)
             finally:
                 if session.runner is current_runner:
                     session.is_busy = False
