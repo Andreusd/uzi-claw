@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 from telegram import Update
@@ -27,6 +28,7 @@ from .forum_helper import (
     format_user_prompt_preview,
     get_topic_icon_id,
     detect_topic_icon_from_prompt,
+    clean_prompt_for_display,
     FORUM_TOPIC_ICONS,
     create_forum_topic_with_retry,
     edit_forum_topic_with_retry,

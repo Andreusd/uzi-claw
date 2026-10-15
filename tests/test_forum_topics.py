@@ -39,6 +39,11 @@ class TestForumTopics(unittest.TestCase):
     def setUp(self):
         # Reset in-memory sessions for clean tests
         session_manager._sessions.clear()
+        s = session_manager.get_session(740821374, None)
+        s.forum_topic_id = None
+        s.conversation_id = None
+        session_manager.save_session(s)
+        session_manager._sessions.clear()
 
     def test_is_forum_general_chat(self):
         # 1. Private chat -> False
