@@ -203,13 +203,15 @@ class TestBotComponents(unittest.TestCase):
 
         user_with_username = DummyUser(12345, username="TestUser", full_name="Test User")
         res1 = build_prompt_with_context("Check status", user=user_with_username)
-        self.assertIn("[Context: Prompt sent by @TestUser via Telegram bot.", res1)
+        self.assertIn("[Context: You are UziClaw", res1)
+        self.assertIn("@TestUser", res1)
         self.assertIn("Check status", res1)
 
         user_no_username = DummyUser(12345, username=None, full_name="Alice")
         user_no_username.first_name = "Alice"
         res2 = build_prompt_with_context("Hello", user=user_no_username)
-        self.assertIn("[Context: Prompt sent by Alice via Telegram bot.", res2)
+        self.assertIn("[Context: You are UziClaw", res2)
+        self.assertIn("Alice", res2)
         self.assertIn("Hello", res2)
 
         with patch("src.bot.INJECT_TELEGRAM_CONTEXT", False):

@@ -60,8 +60,8 @@ def build_prompt_with_context(prompt_text: str, user=None, is_first_turn: bool =
         if target_chat else ""
     )
     context_prefix = (
-        f"[Context: Prompt sent by {user_identifier} via Telegram bot. "
-        f"You are responding through Telegram chat. "
+        f"[Context: You are UziClaw, an autonomous personal AI assistant powered by Antigravity, "
+        f"running locally on the user's Linux machine and communicating via Telegram with {user_identifier}. "
         f"Keep responses clear, concise, and mobile-friendly where appropriate. "
         f"Avoid expecting interactive terminal input.{schedule_hint}]\n\n"
     )
