@@ -255,18 +255,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             session.reset_conversation()
 
-        topic = None
-        if FORUM_GROUP_ID and context and getattr(context, "bot", None):
-            topic_name = f"💬 Nova Conversa {now_str}"
-            topic = await create_forum_topic_with_retry(
-                bot=context.bot,
-                chat_id=FORUM_GROUP_ID,
-                name=topic_name,
-                icon_custom_emoji_id=FORUM_TOPIC_ICONS["chat"],
-            )
-            if topic and hasattr(topic, "message_thread_id"):
-                session.forum_topic_id = topic.message_thread_id
-
+        session.forum_topic_id = None
         session_manager.save_session(session)
 
         if is_running_turn:
@@ -276,19 +265,9 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Sua próxima mensagem já começará em um contexto novo e independente."
             )
         else:
-            topic_mention = f"\nTópico dedicado criado no grupo: **{topic.name}**" if topic else ""
-            reply_text = f"✨ **Nova conversa iniciada!**{topic_mention}\nSua próxima mensagem começará em um contexto novo."
+            reply_text = "✨ **Nova conversa iniciada!**\nSua próxima mensagem começará em um contexto novo."
 
         await safe_reply(msg, reply_text)
-
-        if topic and FORUM_GROUP_ID:
-            await safe_send(
-                context.bot,
-                FORUM_GROUP_ID,
-                "✨ **Nova conversa iniciada via chat privado.** Envie suas mensagens no privado ou aqui neste tópico.",
-                thread_id=topic.message_thread_id,
-            )
-            await unpin_topic_messages_quietly(context.bot, FORUM_GROUP_ID, topic.message_thread_id)
         return
 
     # 3. Inside an existing forum topic (not General):
@@ -614,18 +593,20 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         session.conversation_id = cid
         session_manager.save_session(session)
 
-    # Case 2: Called in Private DM or in General topic
-    else:
+    # Case 2: Called in Private DM
+    elif is_private:
+        session.conversation_id = cid
+        session.forum_topic_id = None
+        session_manager.save_session(session)
+
+    # Case 3: Called in General topic of forum supergroup
+    elif is_general:
         # Check if a forum topic ALREADY exists for this conversation
         existing_topic_id = session_manager.find_topic_for_conversation(cid)
 
         if existing_topic_id:
             # Topic already exists! DO NOT create a new topic.
             target_topic_id = existing_topic_id
-            if is_private:
-                session.conversation_id = cid
-                session.forum_topic_id = existing_topic_id
-                session_manager.save_session(session)
         else:
             # Topic does NOT exist yet. Only create one if FORUM_GROUP_ID is configured.
             if FORUM_GROUP_ID and context and getattr(context, "bot", None):
@@ -645,18 +626,11 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     topic_session = session_manager.get_session(FORUM_GROUP_ID, new_tid)
                     topic_session.conversation_id = cid
                     session_manager.save_session(topic_session)
-                    if is_private:
-                        session.conversation_id = cid
-                        session.forum_topic_id = new_tid
-                        session_manager.save_session(session)
-            elif is_private:
-                session.conversation_id = cid
-                session_manager.save_session(session)
 
     # Retrieve conversation turns for Option A history dump
     turns = session_manager.get_conversation_turns(cid, max_turns=2)
     running_tag = "\n⚡ *Nota:* Esta conversa está ativa/executando no PC." if session_manager.is_conversation_running(cid) else ""
-    topic_mention = f"\n📌 *Tópico no grupo:* `{target_topic_id}`" if target_topic_id and is_private else ""
+    topic_mention = f"\n📌 *Tópico no grupo:* `{target_topic_id}`" if target_topic_id and not is_private else ""
     confirm_text = f"🔄 **Conversa conectada com sucesso!**\n`{cid}`{running_tag}{topic_mention}\nSua próxima mensagem continuará este contexto."
 
     # Format history blocks
@@ -696,18 +670,6 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await safe_reply(msg, confirm_text)
         for h_msg in history_messages:
             await safe_reply(msg, h_msg)
-
-        # Mirror/initialize topic in forum supergroup if newly created
-        if FORUM_GROUP_ID and target_topic_id and created_new_topic:
-            await safe_send(
-                context.bot,
-                FORUM_GROUP_ID,
-                f"✨ **Conversa importada do PC CLI conectada via chat privado.**\n`{cid}`",
-                thread_id=target_topic_id,
-            )
-            for h_msg in history_messages:
-                await safe_send(context.bot, FORUM_GROUP_ID, h_msg, thread_id=target_topic_id)
-            await unpin_topic_messages_quietly(context.bot, FORUM_GROUP_ID, target_topic_id)
 
     else:
         # Inside existing topic: reply right here

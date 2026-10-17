@@ -423,10 +423,6 @@ async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT
 
         for chunk in chunks[1:]:
             await safe_reply(msg, chunk)
-
-        if is_private and FORUM_GROUP_ID and session.forum_topic_id:
-            for chunk in chunks:
-                await safe_send(context.bot, FORUM_GROUP_ID, chunk, thread_id=session.forum_topic_id)
     finally:
         if session.terminal_runner is current_terminal_runner:
             session.is_busy = False
@@ -514,40 +510,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if not prompt_text:
                     return
 
-                # If in private chat, ensure linked forum topic in FORUM_GROUP_ID
-                if is_private and FORUM_GROUP_ID:
-                    topic_name = generate_topic_name(prompt_text)
-                    icon_id = get_topic_icon_id(prompt_text)
-
-                    if session.forum_topic_id is None:
-                        topic = await create_forum_topic_with_retry(
-                            bot=context.bot,
-                            chat_id=FORUM_GROUP_ID,
-                            name=topic_name,
-                            icon_custom_emoji_id=icon_id,
-                        )
-                        target_tid = getattr(topic, "message_thread_id", None)
-                        if target_tid is not None:
-                            session.forum_topic_id = target_tid
-                            session_manager.save_session(session)
-                    elif session.conversation_id is None:
-                        # Topic was pre-created (e.g. by /new with placeholder name); rename it to match prompt
-                        await edit_forum_topic_with_retry(
-                            bot=context.bot,
-                            chat_id=FORUM_GROUP_ID,
-                            message_thread_id=session.forum_topic_id,
-                            name=topic_name,
-                            icon_custom_emoji_id=icon_id,
-                        )
-
-                    if session.forum_topic_id:
-                        try:
-                            preview = format_user_prompt_preview(msg, prompt_text, origin="PV")
-                            await safe_send(context.bot, FORUM_GROUP_ID, preview, thread_id=session.forum_topic_id)
-                            await unpin_topic_messages_quietly(context.bot, FORUM_GROUP_ID, session.forum_topic_id)
-                        except Exception as e:
-                            logger.debug("Failed to send preview or unpin linked topic: %s", e)
-
                 if session.cancel_requested:
                     session.cancel_requested = False
                     await safe_reply(msg, "⏹️ Execution cancelled before starting.")
@@ -609,8 +571,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await updater.update(cancel_text, force=True)
                     else:
                         await safe_reply(msg, cancel_text)
-                    if is_private and FORUM_GROUP_ID and session.forum_topic_id:
-                        await safe_send(context.bot, FORUM_GROUP_ID, cancel_text, thread_id=session.forum_topic_id)
                     return
 
                 if status == "ERROR":
@@ -619,8 +579,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await updater.update(err_display, force=True)
                     else:
                         await safe_reply(msg, err_display)
-                    if is_private and FORUM_GROUP_ID and session.forum_topic_id:
-                        await safe_send(context.bot, FORUM_GROUP_ID, err_display, thread_id=session.forum_topic_id)
                     return
 
                 if not response_text:
@@ -629,8 +587,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await updater.update(empty_msg, force=True)
                     else:
                         await safe_reply(msg, empty_msg)
-                    if is_private and FORUM_GROUP_ID and session.forum_topic_id:
-                        await safe_send(context.bot, FORUM_GROUP_ID, empty_msg, thread_id=session.forum_topic_id)
                     return
 
                 # Response is available: chunk it and send
@@ -646,38 +602,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 # Send any remaining chunks as separate messages
                 for chunk in chunks[1:]:
                     await safe_reply(msg, chunk)
-
-                # Mirror response to the linked forum topic in FORUM_GROUP_ID if private
-                if is_private and FORUM_GROUP_ID and session.forum_topic_id:
-                    for chunk in chunks:
-                        await safe_send(context.bot, FORUM_GROUP_ID, chunk, thread_id=session.forum_topic_id)
-                    try:
-                        topic_session = session_manager.get_session(FORUM_GROUP_ID, session.forum_topic_id)
-                        topic_session.conversation_id = session.conversation_id
-                        session_manager.save_session(topic_session)
-                    except Exception as e:
-                        logger.debug("Failed to sync forum topic session: %s", e)
-
-                    if prompt_text.startswith("[Attached Voice Note:") and response_text:
-                        try:
-                            em, refined_icon_id = detect_topic_icon_from_prompt(response_text)
-                            cand_lines = [l.strip() for l in clean_prompt_for_display(response_text).splitlines() if l.strip() and not l.strip().startswith(("#", "-", "*", ">"))]
-                            first_cand = cand_lines[0] if cand_lines else ""
-                            first_cand = re.sub(r"[*_`#~\[\]\(\)]", "", first_cand).strip()
-                            first_cand = re.sub(r"^([0-9]+\.|\-|\*)\s*", "", first_cand).strip()
-                            if first_cand:
-                                refined_title = f"{em} {first_cand}"
-                                if len(refined_title) > 120:
-                                    refined_title = refined_title[:117] + "..."
-                                await edit_forum_topic_with_retry(
-                                    bot=context.bot,
-                                    chat_id=FORUM_GROUP_ID,
-                                    message_thread_id=session.forum_topic_id,
-                                    name=refined_title[:128],
-                                    icon_custom_emoji_id=refined_icon_id,
-                                )
-                        except Exception as ex:
-                            logger.debug("Failed to auto-refine linked voice topic: %s", ex)
             finally:
                 if session.runner is current_runner:
                     session.is_busy = False
