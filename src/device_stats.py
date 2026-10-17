@@ -32,9 +32,54 @@ def format_bytes(bytes_val: float) -> str:
 
 def get_battery_info() -> Optional[dict[str, Any]]:
     """
-    Read battery status, capacity, and power drain from /sys/class/power_supply.
+    Read battery status, capacity, and power drain from Windows API or /sys/class/power_supply.
     Returns None if no battery is found.
     """
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            class SYSTEM_POWER_STATUS(ctypes.Structure):
+                _fields_ = [
+                    ("ACLineStatus", ctypes.c_ubyte),
+                    ("BatteryFlag", ctypes.c_ubyte),
+                    ("BatteryLifePercent", ctypes.c_ubyte),
+                    ("SystemStatusFlag", ctypes.c_ubyte),
+                    ("BatteryLifeTime", ctypes.c_ulong),
+                    ("BatteryFullLifeTime", ctypes.c_ulong),
+                ]
+
+            sps = SYSTEM_POWER_STATUS()
+            if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(sps)):
+                # BatteryFlag == 128 means No System Battery, 255 means Unknown
+                if sps.BatteryFlag == 128 or sps.BatteryLifePercent == 255:
+                    return None
+                capacity = int(sps.BatteryLifePercent)
+                ac_connected = (sps.ACLineStatus == 1)
+                is_charging = bool(sps.BatteryFlag & 8)
+                if is_charging:
+                    status = "Charging"
+                elif ac_connected:
+                    status = "Full / AC Connected" if capacity >= 95 else "AC Connected"
+                else:
+                    status = "Discharging"
+
+                time_str = ""
+                if sps.BatteryLifeTime != 0xFFFFFFFF and sps.BatteryLifeTime > 0:
+                    h, rem = divmod(sps.BatteryLifeTime, 3600)
+                    m = rem // 60
+                    time_str = f"~{h}h {m}m left"
+
+                return {
+                    "name": "BAT0",
+                    "capacity": capacity,
+                    "status": status,
+                    "power_w": 0.0,
+                    "time_estimate": time_str,
+                    "ac_connected": ac_connected,
+                }
+        except Exception as e:
+            logger.debug("Failed to read Windows battery: %s", e)
+
     bat_paths = sorted(glob.glob("/sys/class/power_supply/BAT*"))
     if not bat_paths:
         return None
@@ -140,24 +185,28 @@ def get_battery_info() -> Optional[dict[str, Any]]:
 
 def get_cpu_info() -> dict[str, Any]:
     """Retrieve CPU load average, core count, and model."""
-    try:
-        load1, load5, load15 = os.getloadavg()
-    except (AttributeError, OSError):
-        load1, load5, load15 = 0.0, 0.0, 0.0
-
     cores = os.cpu_count() or 1
-
     model = ""
-    cpuinfo = Path("/proc/cpuinfo")
-    if cpuinfo.exists():
+    load1, load5, load15 = 0.0, 0.0, 0.0
+
+    if platform.system() == "Windows":
+        model = platform.processor() or ""
+    else:
         try:
-            with cpuinfo.open("r", encoding="utf-8") as f:
-                for line in f:
-                    if "model name" in line:
-                        model = line.split(":", 1)[1].strip()
-                        break
-        except Exception:
-            pass
+            load1, load5, load15 = os.getloadavg()
+        except (AttributeError, OSError):
+            load1, load5, load15 = 0.0, 0.0, 0.0
+
+        cpuinfo = Path("/proc/cpuinfo")
+        if cpuinfo.exists():
+            try:
+                with cpuinfo.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        if "model name" in line:
+                            model = line.split(":", 1)[1].strip()
+                            break
+            except Exception:
+                pass
 
     return {
         "load_1m": load1,
@@ -169,7 +218,48 @@ def get_cpu_info() -> dict[str, Any]:
 
 
 def get_memory_info() -> dict[str, Any]:
-    """Parse /proc/meminfo for RAM and Swap statistics."""
+    """Parse memory statistics for RAM and Swap."""
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                tot = stat.ullTotalPhys
+                avail = stat.ullAvailPhys
+                used = max(0, tot - avail)
+                mem_pct = float(stat.dwMemoryLoad)
+
+                swap_tot = max(0, stat.ullTotalPageFile - stat.ullTotalPhys)
+                swap_avail = max(0, stat.ullAvailPageFile - stat.ullAvailPhys)
+                swap_used = max(0, swap_tot - swap_avail)
+                swap_pct = (swap_used / swap_tot * 100.0) if swap_tot else 0.0
+
+                return {
+                    "total_bytes": tot,
+                    "used_bytes": used,
+                    "available_bytes": avail,
+                    "used_percent": mem_pct,
+                    "swap_total_bytes": swap_tot,
+                    "swap_used_bytes": swap_used,
+                    "swap_percent": swap_pct,
+                }
+        except Exception as e:
+            logger.debug("Failed to read Windows memory: %s", e)
+
     mem_dict: dict[str, int] = {}
     meminfo = Path("/proc/meminfo")
     if meminfo.exists():
@@ -205,8 +295,10 @@ def get_memory_info() -> dict[str, Any]:
     }
 
 
-def get_disk_info(path: str = "/") -> dict[str, Any]:
+def get_disk_info(path: Optional[str] = None) -> dict[str, Any]:
     """Retrieve filesystem space usage."""
+    if not path or path == "/":
+        path = (os.environ.get("SystemDrive", "C:") + "\\") if platform.system() == "Windows" else "/"
     try:
         usage = shutil.disk_usage(path)
         pct = (usage.used / usage.total * 100.0) if usage.total else 0.0
@@ -229,7 +321,22 @@ def get_disk_info(path: str = "/") -> dict[str, Any]:
 
 
 def get_system_uptime() -> str:
-    """Format system uptime from /proc/uptime into human-readable string."""
+    """Format system uptime into human-readable string."""
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            k32.GetTickCount64.restype = ctypes.c_uint64
+            total_sec = k32.GetTickCount64() / 1000.0
+            days, rem = divmod(int(total_sec), 86400)
+            hours, rem = divmod(rem, 3600)
+            mins, _ = divmod(rem, 60)
+            if days > 0:
+                return f"{days}d {hours}h {mins}m"
+            return f"{hours}h {mins}m"
+        except Exception:
+            return "Unknown"
+
     uptime_file = Path("/proc/uptime")
     if not uptime_file.exists():
         return "Unknown"
@@ -248,7 +355,10 @@ def get_system_uptime() -> str:
 
 
 def get_os_pretty_name() -> str:
-    """Get Linux distribution name or platform system."""
+    """Get operating system pretty name."""
+    if platform.system() == "Windows":
+        return f"Windows {platform.release()} ({platform.version()})"
+
     os_release = Path("/etc/os-release")
     if os_release.exists():
         try:
@@ -297,15 +407,26 @@ def format_device_stats() -> str:
     else:
         # Check if AC adapter is online
         ac_online = False
-        for ac_path in glob.glob("/sys/class/power_supply/*"):
-            p = Path(ac_path)
+        if platform.system() == "Windows":
             try:
-                on = p / "online"
-                if on.exists() and on.read_text(encoding="utf-8").strip() == "1":
-                    ac_online = True
-                    break
+                import ctypes
+                class SPS(ctypes.Structure):
+                    _fields_ = [("ACLineStatus", ctypes.c_ubyte)]
+                s = SPS()
+                if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(s)):
+                    ac_online = (s.ACLineStatus == 1)
             except Exception:
                 pass
+        else:
+            for ac_path in glob.glob("/sys/class/power_supply/*"):
+                p = Path(ac_path)
+                try:
+                    on = p / "online"
+                    if on.exists() and on.read_text(encoding="utf-8").strip() == "1":
+                        ac_online = True
+                        break
+                except Exception:
+                    pass
         pwr_text = "Connected (AC Power)" if ac_online else "AC Powered (No battery)"
         lines.append(f"🔌 **Power:** {pwr_text}\n")
 
@@ -318,7 +439,10 @@ def format_device_stats() -> str:
     c_model = cpu["model"]
     model_line = f" • `{c_model}`" if c_model else ""
 
-    lines.append(f"⚙️ **CPU Load:** `{c_1m:.2f}`, `{c_5m:.2f}`, `{c_15m:.2f}` ({c_cores} cores){model_line}")
+    if platform.system() == "Windows":
+        lines.append(f"⚙️ **CPU Load:** {c_cores} cores{model_line}")
+    else:
+        lines.append(f"⚙️ **CPU Load:** `{c_1m:.2f}`, `{c_5m:.2f}`, `{c_15m:.2f}` ({c_cores} cores){model_line}")
 
     # 3. RAM & Swap
     mem = get_memory_info()
@@ -337,12 +461,13 @@ def format_device_stats() -> str:
         lines.append("")
 
     # 4. Disk
-    disk = get_disk_info("/")
+    disk = get_disk_info()
     if disk["total_bytes"] > 0:
         d_used = format_bytes(disk["used_bytes"])
         d_tot = format_bytes(disk["total_bytes"])
         d_pct = disk["used_percent"]
-        lines.append(f"💾 **Disk (/):** {d_used} / {d_tot} ({d_pct:.0f}%)")
+        d_path = disk.get("path", "/")
+        lines.append(f"💾 **Disk ({d_path}):** {d_used} / {d_tot} ({d_pct:.0f}%)")
         lines.append(f"`[{make_progress_bar(d_pct)}]`\n")
 
     # 5. OS & Host Info

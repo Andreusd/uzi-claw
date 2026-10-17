@@ -383,17 +383,20 @@ class TestBotComponents(unittest.TestCase):
             res_err = await runner.run("ls /nonexistent_test_directory_404", cwd=str(Path.home()))
             self.assertEqual(res_err["status"], "ERROR")
             self.assertNotEqual(res_err["exit_code"], 0)
-            self.assertIn("No such file or directory", res_err["output"])
+            err_lower = res_err["output"].lower()
+            self.assertTrue(any(term in err_lower for term in ["cannot find", "no such", "not found", "does not exist"]))
 
             # 3. Command with cd
-            res_cd = await runner.run("cd /tmp && pwd", cwd=str(Path.home()))
+            parent_dir = str(Path.home().parent)
+            res_cd = await runner.run(f"cd '{parent_dir}'", cwd=str(Path.home()))
             self.assertEqual(res_cd["status"], "SUCCESS")
-            self.assertEqual(res_cd["new_cwd"], "/tmp")
+            self.assertEqual(Path(res_cd["new_cwd"]).resolve(), Path(parent_dir).resolve())
 
             # 4. Cancel
             async def run_cancel():
-                task = asyncio.create_task(runner.run("sleep 10", cwd=str(Path.home())))
-                await asyncio.sleep(0.2)
+                sleep_cmd = 'python -c "import time; time.sleep(10)"'
+                task = asyncio.create_task(runner.run(sleep_cmd, cwd=str(Path.home())))
+                await asyncio.sleep(0.3)
                 self.assertTrue(runner.is_running)
                 cancelled = await runner.cancel()
                 self.assertTrue(cancelled)
@@ -721,9 +724,11 @@ x < 10 && y > 20
             mock_proc.pid = 9999
             agy_runner._current_process = mock_proc
 
+            expected_sig = signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT
+
             # Once interrupted, simulate process exit
             def fake_send_signal(sig):
-                self.assertEqual(sig, signal.SIGINT)
+                self.assertEqual(sig, expected_sig)
                 mock_proc.returncode = 0
             mock_proc.send_signal = fake_send_signal
 
@@ -741,7 +746,7 @@ x < 10 && y > 20
             term_runner._current_process = mock_term_proc
 
             def fake_term_send_signal(sig):
-                self.assertEqual(sig, signal.SIGINT)
+                self.assertEqual(sig, expected_sig)
                 mock_term_proc.returncode = 0
             mock_term_proc.send_signal = fake_term_send_signal
 
@@ -1072,6 +1077,13 @@ x < 10 && y > 20
             self.assertIn("💬 Testes concluídos com sucesso!", text4)
 
         asyncio.run(run_tracker())
+
+    def test_system_tray(self):
+        from src.tray import tray_manager, generate_tray_icon
+        img = generate_tray_icon()
+        self.assertIsNotNone(img)
+        self.assertEqual(img.size, (64, 64))
+        self.assertTrue(tray_manager.is_available)
 
 
 if __name__ == "__main__":

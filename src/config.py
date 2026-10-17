@@ -3,6 +3,8 @@
 from pathlib import Path
 import os
 import shutil
+import sys
+from typing import Optional
 from dotenv import load_dotenv
 
 # Base paths
@@ -11,7 +13,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 
-# CLI binary path: default to environment, or ~/.local/bin/agy, or which agy
+# CLI binary path: default to environment, or which agy, or OS-specific install paths
 _custom_agy_path = os.getenv("AGY_BIN_PATH")
 if _custom_agy_path and Path(_custom_agy_path).exists():
     AGY_BIN_PATH = _custom_agy_path
@@ -19,6 +21,14 @@ else:
     _which_agy = shutil.which("agy")
     if _which_agy:
         AGY_BIN_PATH = _which_agy
+    elif sys.platform == "win32":
+        _win_candidates = [
+            Path.home() / "AppData" / "Local" / "agy" / "bin" / "agy.exe",
+            Path.home() / "AppData" / "Local" / "Programs" / "agy" / "bin" / "agy.exe",
+            Path.home() / "AppData" / "Local" / "agy" / "agy.exe",
+            Path.home() / "AppData" / "Local" / "Google" / "Antigravity" / "bin" / "agy.exe",
+        ]
+        AGY_BIN_PATH = next((str(p) for p in _win_candidates if p.exists()), str(_win_candidates[0]))
     else:
         _home_agy = Path.home() / ".local" / "bin" / "agy"
         AGY_BIN_PATH = str(_home_agy)
@@ -39,8 +49,11 @@ DEFAULT_EFFORT = os.getenv("DEFAULT_EFFORT", "").strip()
 # Prompt context injection (prepends Telegram origin metadata to prompts)
 INJECT_TELEGRAM_CONTEXT = os.getenv("INJECT_TELEGRAM_CONTEXT", "true").lower() in ("true", "1", "yes")
 
-# System tray icon (StatusNotifierItem on Linux desktop)
-ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", "true").lower() in ("true", "1", "yes")
+# Shell configuration for direct terminal execution
+DEFAULT_SHELL = os.getenv("DEFAULT_SHELL", "powershell" if sys.platform == "win32" else "bash")
+
+# System tray icon (StatusNotifierItem on Linux desktop, pystray on Windows)
+ENABLE_TRAY_ICON = os.getenv("ENABLE_TRAY_ICON", os.getenv("ENABLE_TRAY", "true")).lower() in ("true", "1", "yes")
 
 # Media directory for incoming photos and voice notes
 MEDIA_DIR = PROJECT_ROOT / "media"

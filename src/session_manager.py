@@ -3,9 +3,19 @@
 import asyncio
 import os
 import re
-import fcntl
+import sys
 import json
 import logging
+
+if sys.platform == "win32":
+    import msvcrt
+    fcntl = None
+else:
+    msvcrt = None
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -558,8 +568,13 @@ class SessionManager:
             try:
                 fd = os.open(lock_file, os.O_RDWR)
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    if sys.platform == "win32" and msvcrt is not None:
+                        # Non-blocking lock test on Windows
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    elif fcntl is not None:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(fd, fcntl.LOCK_UN)
                 except (BlockingIOError, OSError):
                     return True
                 finally:

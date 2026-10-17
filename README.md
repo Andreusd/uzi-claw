@@ -74,7 +74,27 @@ cp authorized_users.txt.example authorized_users.txt
 
 ## Running the Bot
 
-### Manual Execution (for testing):
+### Windows Execution:
+
+**Option 1: Background Daemon with System Tray (Recommended)**
+Double-click `start_bridge.bat` or run:
+```powershell
+pythonw main.py
+```
+*(Places the crab icon in your Windows system notification tray with quick actions and Exit menu).*
+
+**Option 2: Terminal Console (for testing/logs)**
+Double-click `run_console.bat` or run:
+```powershell
+python main.py
+```
+
+To stop all running background instances on Windows:
+```powershell
+.\stop_bridge.bat
+```
+
+### Linux Execution (for testing):
 
 ```bash
 cd ~/Documents/Projects/UziClaw

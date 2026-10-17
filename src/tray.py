@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ICONS_DIR = str(PROJECT_ROOT / "icons")
 ENV_FILE = PROJECT_ROOT / ".env"
 
-# Ensure D-Bus and GLib are available
+# Ensure D-Bus and GLib are available on Linux
 HAS_DBUS = False
 try:
     import dbus
@@ -23,7 +23,19 @@ try:
     from gi.repository import GLib
     HAS_DBUS = True
 except ImportError as e:
-    logger.warning("D-Bus or GLib not available in environment: %s. System tray will be disabled.", e)
+    if sys.platform != "win32":
+        logger.warning("D-Bus or GLib not available in environment: %s. System tray will be disabled.", e)
+
+# Ensure pystray and Pillow are available on Windows
+HAS_PYSTRAY = False
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    HAS_PYSTRAY = True
+except ImportError:
+    pystray = None
+    Image = None
+    ImageDraw = None
 
 
 if HAS_DBUS:
@@ -456,8 +468,147 @@ def open_config_file():
         subprocess.Popen(["xdg-open", str(ENV_FILE)])
 
 
-def start_tray_in_background(session_manager=None) -> Optional["TelegramBridgeTrayApp"]:
-    """Initialize and start the system tray icon in a dedicated daemon thread."""
+def generate_tray_icon(size: int = 64) -> Optional[Any]:
+    """Generate or load an icon image for the Windows system tray."""
+    if not Image:
+        return None
+
+    crab_path = PROJECT_ROOT / "icons" / "uziclaw.png"
+    if crab_path.exists():
+        try:
+            img = Image.open(crab_path).convert("RGBA")
+            return img.resize((size, size), Image.Resampling.LANCZOS)
+        except Exception:
+            pass
+
+    if not ImageDraw:
+        return None
+
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((2, 2, size - 3, size - 3), fill=(235, 71, 26))
+    points = [(size // 2, 12), (size - 16, size - 14), (16, size - 14)]
+    draw.polygon(points, fill=(255, 255, 255))
+    inner_points = [(size // 2, 26), (size - 24, size - 18), (24, size - 18)]
+    draw.polygon(inner_points, fill=(235, 71, 26))
+    draw.ellipse((size - 18, size - 18, size - 2, size - 2), fill=(0, 230, 118), outline=(255, 255, 255), width=2)
+    return img
+
+
+class WindowsTrayManager:
+    """Manages the Windows system tray icon and menus using pystray."""
+
+    def __init__(self, session_manager=None):
+        self.session_manager = session_manager
+        self._icon: Optional["pystray.Icon"] = None
+        self._is_running = False
+
+    @property
+    def is_available(self) -> bool:
+        return HAS_PYSTRAY and pystray is not None
+
+    def start(self) -> bool:
+        """Start the system tray icon detached on its own thread."""
+        if not self.is_available:
+            logger.info("Windows system tray is not available (pystray or Pillow not installed).")
+            return False
+
+        if self._is_running:
+            return True
+
+        from .config import DEFAULT_WORKSPACE, AGY_BRAIN_DIR
+
+        image = generate_tray_icon(64)
+        if not image:
+            return False
+
+        def open_path(path_target: Path):
+            def handler(icon, item):
+                try:
+                    if sys.platform == "win32":
+                        os.startfile(str(path_target))
+                    elif sys.platform == "darwin":
+                        subprocess.Popen(["open", str(path_target)])
+                    else:
+                        subprocess.Popen(["xdg-open", str(path_target)])
+                except Exception as e:
+                    logger.error("Failed to open path %s: %s", path_target, e)
+            return handler
+
+        def on_exit(icon, item):
+            logger.info("Exit requested from Windows system tray.")
+            self.stop()
+            import _thread
+            _thread.interrupt_main()
+
+        menu_items = [
+            pystray.MenuItem("🦀 UziClaw: Active", None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("📁 Open Working Folder", open_path(Path(DEFAULT_WORKSPACE))),
+            pystray.MenuItem("📂 Open Project Folder", open_path(PROJECT_ROOT)),
+            pystray.MenuItem("🧠 Open Antigravity Brain", open_path(AGY_BRAIN_DIR)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("❌ Quit & Stop UziClaw", on_exit),
+        ]
+
+        try:
+            self._icon = pystray.Icon(
+                name="UziClaw",
+                icon=image,
+                title="UziClaw Telegram Bridge (Running)",
+                menu=pystray.Menu(*menu_items),
+            )
+            self._icon.run_detached()
+            self._is_running = True
+            logger.info("UziClaw Windows system tray icon started successfully.")
+            return True
+        except Exception as e:
+            logger.error("Failed to launch Windows system tray icon: %s", e)
+            return False
+
+    def update_tooltip(self, text: str) -> None:
+        """Update the hover tooltip text on the tray icon."""
+        if self._icon and self._is_running:
+            try:
+                self._icon.title = f"UziClaw: {text}"
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        """Stop and remove the tray icon."""
+        if self._icon and self._is_running:
+            try:
+                self._icon.stop()
+            except Exception:
+                pass
+            finally:
+                self._icon = None
+                self._is_running = False
+                logger.info("Windows system tray icon stopped.")
+
+
+# Alias for compatibility with earlier Windows branch
+SystemTrayManager = WindowsTrayManager
+tray_manager = WindowsTrayManager()
+
+_active_tray_instance = None
+
+
+def start_tray_in_background(session_manager=None):
+    """Initialize and start the cross-platform system tray icon in background."""
+    global _active_tray_instance
+
+    if sys.platform == "win32":
+        if not HAS_PYSTRAY:
+            logger.info("Windows system tray disabled (pystray/Pillow not available).")
+            return None
+        tray = WindowsTrayManager(session_manager=session_manager)
+        if tray.start():
+            _active_tray_instance = tray
+            return tray
+        return None
+
+    # Linux desktop with D-Bus
     if not HAS_DBUS:
         logger.info("System tray disabled (D-Bus/GLib not available).")
         return None
@@ -472,15 +623,39 @@ def start_tray_in_background(session_manager=None) -> Optional["TelegramBridgeTr
         thread = threading.Thread(target=app.run, name="TelegramBridgeTray", daemon=True)
         thread.start()
         logger.info("UziClaw Telegram Bridge tray icon started in background thread.")
+        _active_tray_instance = app
         return app
     except Exception as e:
         logger.warning("Could not initialize system tray indicator: %s", e)
         return None
 
 
+def stop_tray() -> None:
+    """Stop active system tray instance if running."""
+    global _active_tray_instance
+    if _active_tray_instance:
+        try:
+            if hasattr(_active_tray_instance, "stop"):
+                _active_tray_instance.stop()
+        except Exception as e:
+            logger.debug("Failed to stop system tray cleanly: %s", e)
+        finally:
+            _active_tray_instance = None
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     from src.session_manager import session_manager as default_sm
     print("Starting standalone Telegram Bridge tray indicator...")
-    tray = TelegramBridgeTrayApp(session_manager=default_sm)
-    tray.run()
+    if sys.platform == "win32":
+        tray = WindowsTrayManager(session_manager=default_sm)
+        tray.start()
+        import time
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            tray.stop()
+    else:
+        tray = TelegramBridgeTrayApp(session_manager=default_sm)
+        tray.run()

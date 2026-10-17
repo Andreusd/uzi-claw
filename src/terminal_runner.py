@@ -8,13 +8,17 @@ import signal
 from pathlib import Path
 from typing import Optional, Any
 
+import shutil
+import sys
+from .config import DEFAULT_SHELL
+
 logger = logging.getLogger(__name__)
 
 CWD_MARKER = "___CWD_MARKER___"
 
 
 class TerminalRunner:
-    """Manages executing shell commands directly in bash."""
+    """Manages executing shell commands directly in shell (PowerShell on Windows, bash on Linux)."""
 
     def __init__(self):
         self._current_process: Optional[asyncio.subprocess.Process] = None
@@ -32,16 +36,22 @@ class TerminalRunner:
             return False
 
         self._is_cancelled = True
-        logger.info("Attempting to interrupt running shell process PID %d (SIGINT)", proc.pid)
+        logger.info("Attempting to interrupt running shell process PID %d", proc.pid)
         try:
-            proc.send_signal(signal.SIGINT)
+            if sys.platform == "win32":
+                try:
+                    proc.send_signal(signal.CTRL_BREAK_EVENT)
+                except Exception:
+                    proc.terminate()
+            else:
+                proc.send_signal(signal.SIGINT)
             for _ in range(6):
                 if proc.returncode is not None:
                     break
                 await asyncio.sleep(0.5)
 
             if proc.returncode is None:
-                logger.warning("Process did not exit on SIGINT, terminating PID %d", proc.pid)
+                logger.warning("Process did not exit on interrupt, terminating PID %d", proc.pid)
                 proc.terminate()
             return True
         except ProcessLookupError:
@@ -82,7 +92,7 @@ class TerminalRunner:
         timeout: float = 120.0,
     ) -> dict[str, Any]:
         """
-        Execute a bash command in cwd and return the result dict:
+        Execute a shell command in cwd and return the result dict:
           - output: str
           - exit_code: Optional[int]
           - status: "SUCCESS" | "ERROR" | "TIMEOUT" | "CANCELLED"
@@ -94,22 +104,48 @@ class TerminalRunner:
 
         # Check if command contains cd
         has_cd = bool(re.search(r"(^|[;&|]\s*)cd(\s|$)", command.strip()))
-        if has_cd:
-            full_shell_cmd = f"{command} && echo '{CWD_MARKER}' && pwd -P"
+        is_win = sys.platform == "win32"
+        shell_choice = DEFAULT_SHELL.lower()
+
+        if shell_choice in ("powershell", "pwsh") or (is_win and shell_choice not in ("bash", "cmd")):
+            ps_bin = "powershell.exe" if shell_choice != "pwsh" else "pwsh"
+            if has_cd:
+                full_shell_cmd = f"{command} ; Write-Output '{CWD_MARKER}' ; (Get-Location).Path"
+            else:
+                full_shell_cmd = command
+            cmd_args = [ps_bin, "-NoProfile", "-Command", full_shell_cmd]
+        elif is_win and shell_choice == "cmd":
+            if has_cd:
+                full_shell_cmd = f"{command} & echo {CWD_MARKER} & cd"
+            else:
+                full_shell_cmd = command
+            cmd_args = ["cmd.exe", "/c", full_shell_cmd]
         else:
-            full_shell_cmd = command
+            # Unix bash
+            bash_bin = shutil.which("bash") or "/bin/bash"
+            if has_cd:
+                full_shell_cmd = f"{command} && echo '{CWD_MARKER}' && pwd -P"
+            else:
+                full_shell_cmd = command
+            cmd_args = [bash_bin, "-c", full_shell_cmd]
 
         logger.info("Executing shell command in %s: %s", work_dir, command)
 
         try:
+            extra_kwargs = {}
+            if is_win:
+                import subprocess
+                extra_kwargs["creationflags"] = (
+                    subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+                )
+
             self._current_process = await asyncio.create_subprocess_exec(
-                "/bin/bash",
-                "-c",
-                full_shell_cmd,
+                *cmd_args,
                 cwd=work_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=os.environ.copy(),
+                **extra_kwargs,
             )
 
             try:

@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import signal
+import subprocess
+import sys
 from typing import AsyncGenerator, Callable, Awaitable, Optional, Any
 from pathlib import Path
 
@@ -31,16 +33,22 @@ class AntigravityRunner:
             return False
 
         self._is_cancelled = True
-        logger.info("Attempting to interrupt running agy process PID %d with SIGINT (Esc)", self._current_process.pid)
+        logger.info("Attempting to interrupt running agy process PID %d", self._current_process.pid)
         try:
-            self._current_process.send_signal(signal.SIGINT)
+            if sys.platform == "win32":
+                try:
+                    self._current_process.send_signal(signal.CTRL_BREAK_EVENT)
+                except Exception:
+                    self._current_process.terminate()
+            else:
+                self._current_process.send_signal(signal.SIGINT)
             for _ in range(6):
                 if self._current_process.returncode is not None:
                     break
                 await asyncio.sleep(0.5)
 
             if self._current_process.returncode is None:
-                logger.warning("Force terminating agy process PID %d after SIGINT timeout", self._current_process.pid)
+                logger.warning("Force terminating agy process PID %d after interrupt timeout", self._current_process.pid)
                 self._current_process.terminate()
             return True
         except ProcessLookupError:
@@ -118,11 +126,18 @@ class AntigravityRunner:
         stderr_lines: list[str] = []
 
         try:
+            extra_kwargs = {}
+            if sys.platform == "win32":
+                extra_kwargs["creationflags"] = (
+                    subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+                )
+
             self._current_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=work_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **extra_kwargs,
             )
 
             # Background task to capture stderr
@@ -271,10 +286,15 @@ async def get_usage(bin_path: str = AGY_BIN_PATH) -> tuple[Optional[dict], Optio
     """
     cmd = [bin_path, "--output-format=stream-json", "-p=/usage"]
     try:
+        extra_kwargs = {}
+        if sys.platform == "win32":
+            extra_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **extra_kwargs,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
 
