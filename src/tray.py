@@ -28,12 +28,18 @@ except ImportError as e:
 
 # Ensure pystray and Pillow are available on Windows
 HAS_PYSTRAY = False
+pystray = None
+if sys.platform == "win32":
+    try:
+        import pystray
+        HAS_PYSTRAY = True
+    except Exception as e:
+        logger.debug("pystray not available on Windows: %s", e)
+        pystray = None
+
 try:
-    import pystray
     from PIL import Image, ImageDraw
-    HAS_PYSTRAY = True
-except ImportError:
-    pystray = None
+except Exception:
     Image = None
     ImageDraw = None
 
