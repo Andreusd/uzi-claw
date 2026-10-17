@@ -23,6 +23,7 @@ from .config import (
     AGY_PRESENCE_DIR,
     AGY_BRAIN_DIR,
     SESSIONS_DB_PATH,
+    FORUM_GROUP_ID,
 )
 from .antigravity_runner import AntigravityRunner
 from .terminal_runner import TerminalRunner
@@ -234,6 +235,161 @@ class SessionManager:
             else:
                 self._sessions[key] = SessionState(chat_id=chat_id, thread_id=thread_id)
         return self._sessions[key]
+
+    def find_topic_for_conversation(self, cid: str) -> Optional[int]:
+        """Find existing forum topic ID for a given conversation ID, if one exists."""
+        if not cid:
+            return None
+
+        # 1. Check active in-memory sessions
+        for s in self._sessions.values():
+            if s.conversation_id == cid:
+                if s.forum_topic_id and s.forum_topic_id > 1:
+                    return int(s.forum_topic_id)
+                if s.thread_id and s.thread_id > 1:
+                    return int(s.thread_id)
+
+        # 2. Query SQLite DB
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                cursor = conn.cursor()
+                if FORUM_GROUP_ID:
+                    cursor.execute(
+                        "SELECT thread_id FROM sessions WHERE chat_id = ? AND conversation_id = ? AND thread_id IS NOT NULL AND thread_id > 1 ORDER BY updated_at DESC LIMIT 1",
+                        (FORUM_GROUP_ID, cid),
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        return int(row[0])
+
+                cursor.execute(
+                    "SELECT forum_topic_id FROM sessions WHERE conversation_id = ? AND forum_topic_id IS NOT NULL AND forum_topic_id > 1 ORDER BY updated_at DESC LIMIT 1",
+                    (cid,),
+                )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    return int(row[0])
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error("Failed to query topic for conversation %s: %s", cid, e)
+
+        return None
+
+    def get_conversation_first_prompt(self, cid: str) -> Optional[str]:
+        """Retrieve the initial user prompt from transcript or history for topic naming."""
+        if not cid:
+            return None
+
+        # Try transcript.jsonl
+        tpath = AGY_BRAIN_DIR / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        if tpath.exists():
+            try:
+                with tpath.open("r", encoding="utf-8") as tf:
+                    for line in tf:
+                        if '"USER_INPUT"' not in line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("type") == "USER_INPUT":
+                                content = entry.get("content", "")
+                                prompt = self._clean_prompt_display(content)
+                                if prompt and prompt != "Reply with the single word: PONG":
+                                    return prompt
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.debug("Failed to read first prompt from transcript for %s: %s", cid, e)
+
+        # Fallback to history.jsonl
+        if AGY_HISTORY_FILE.exists():
+            try:
+                with AGY_HISTORY_FILE.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        if cid not in line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("conversationId") == cid:
+                                display = entry.get("display", "").strip()
+                                if display and not display.startswith("/"):
+                                    return display
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.debug("Failed to read first prompt from history for %s: %s", cid, e)
+
+        return None
+
+    def get_conversation_turns(self, cid: str, max_turns: int = 2) -> list[dict]:
+        """
+        Extract recent conversation turns from transcript.jsonl.
+        Returns a list of dicts: {'user': str, 'assistant': str, 'tools': list[str]}
+        """
+        if not cid:
+            return []
+
+        tpath = AGY_BRAIN_DIR / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        if not tpath.exists():
+            return []
+
+        turns = []
+        current_user = None
+        current_assistant = None
+        tools_used = []
+
+        try:
+            with tpath.open("r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except Exception:
+                        continue
+                    t = entry.get("type")
+                    if t == "USER_INPUT":
+                        if current_user is not None or current_assistant is not None:
+                            turns.append({
+                                "user": current_user,
+                                "assistant": current_assistant,
+                                "tools": list(tools_used),
+                            })
+                        current_user = entry.get("content", "")
+                        current_assistant = None
+                        tools_used = []
+                    elif t == "PLANNER_RESPONSE":
+                        content = entry.get("content")
+                        if content:
+                            current_assistant = content
+                        t_calls = entry.get("tool_calls")
+                        if t_calls and isinstance(t_calls, list):
+                            for tc in t_calls:
+                                name = tc.get("name")
+                                if name and name not in tools_used:
+                                    tools_used.append(name)
+
+            if current_user is not None or current_assistant is not None:
+                turns.append({
+                    "user": current_user,
+                    "assistant": current_assistant,
+                    "tools": list(tools_used),
+                })
+        except Exception as e:
+            logger.error("Failed to parse transcript turns for %s: %s", cid, e)
+            return []
+
+        valid_turns = []
+        for turn in turns:
+            u = self._clean_prompt_display(turn["user"] or "")
+            a = (turn["assistant"] or "").strip()
+            if u or a:
+                valid_turns.append({
+                    "user": u,
+                    "assistant": a,
+                    "tools": turn["tools"],
+                })
+
+        return valid_turns[-max_turns:]
 
     def list_recent_conversations(self, limit: int = 8) -> list[dict]:
         """

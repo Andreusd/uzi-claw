@@ -20,6 +20,8 @@ from .forum_helper import (
     FORUM_TOPIC_ICONS,
     create_forum_topic_with_retry,
     unpin_topic_messages_quietly,
+    generate_topic_name,
+    get_topic_icon_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -579,12 +581,15 @@ async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 @restricted
-@general_topic_redirect
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Resume a specific conversation ID or recent conversation index."""
+    """Resume a specific conversation ID or recent conversation index with history dump and topic reuse."""
     msg = update.effective_message
-    if not msg:
+    chat = update.effective_chat
+    if not msg or not chat:
         return
+
+    is_general = is_forum_general_chat(chat, msg)
+    is_private = (chat.type == "private")
 
     if not context.args:
         # Listing chats when /resume is called without an argument
@@ -632,10 +637,122 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if not cid:
             cid = clean_arg
 
-    session.conversation_id = cid
-    session_manager.save_session(session)
-    running_tag = "\n⚡ *Note:* This conversation is currently active/running." if session_manager.is_conversation_running(cid) else ""
-    await safe_reply(msg, f"🔄 Resumed conversation:\n`{cid}`{running_tag}\nYour next prompt will continue this session.")
+    # Determine topic target and whether a new topic is needed
+    raw_thread_id = getattr(msg, "message_thread_id", None)
+    current_thread_id = raw_thread_id if isinstance(raw_thread_id, int) else None
+
+    target_topic_id = None
+    created_new_topic = False
+    topic_name = ""
+
+    # Case 1: Called inside an existing topic in the forum supergroup (not General)
+    if not is_private and not is_general and current_thread_id and current_thread_id > 1:
+        target_topic_id = current_thread_id
+        session.conversation_id = cid
+        session_manager.save_session(session)
+
+    # Case 2: Called in Private DM or in General topic
+    else:
+        # Check if a forum topic ALREADY exists for this conversation
+        existing_topic_id = session_manager.find_topic_for_conversation(cid)
+
+        if existing_topic_id:
+            # Topic already exists! DO NOT create a new topic.
+            target_topic_id = existing_topic_id
+            if is_private:
+                session.conversation_id = cid
+                session.forum_topic_id = existing_topic_id
+                session_manager.save_session(session)
+        else:
+            # Topic does NOT exist yet. Only create one if FORUM_GROUP_ID is configured.
+            if FORUM_GROUP_ID and context and getattr(context, "bot", None):
+                first_prompt = session_manager.get_conversation_first_prompt(cid)
+                topic_name = generate_topic_name(first_prompt or f"Conversa {cid[:8]}", default_prefix="PC CLI")
+                icon_id = get_topic_icon_id(first_prompt)
+                topic = await create_forum_topic_with_retry(
+                    bot=context.bot,
+                    chat_id=FORUM_GROUP_ID,
+                    name=topic_name,
+                    icon_custom_emoji_id=icon_id,
+                )
+                new_tid = getattr(topic, "message_thread_id", None)
+                if new_tid:
+                    target_topic_id = new_tid
+                    created_new_topic = True
+                    topic_session = session_manager.get_session(FORUM_GROUP_ID, new_tid)
+                    topic_session.conversation_id = cid
+                    session_manager.save_session(topic_session)
+                    if is_private:
+                        session.conversation_id = cid
+                        session.forum_topic_id = new_tid
+                        session_manager.save_session(session)
+            elif is_private:
+                session.conversation_id = cid
+                session_manager.save_session(session)
+
+    # Retrieve conversation turns for Option A history dump
+    turns = session_manager.get_conversation_turns(cid, max_turns=2)
+    running_tag = "\n⚡ *Nota:* Esta conversa está ativa/executando no PC." if session_manager.is_conversation_running(cid) else ""
+    topic_mention = f"\n📌 *Tópico no grupo:* `{target_topic_id}`" if target_topic_id and is_private else ""
+    confirm_text = f"🔄 **Conversa conectada com sucesso!**\n`{cid}`{running_tag}{topic_mention}\nSua próxima mensagem continuará este contexto."
+
+    # Format history blocks
+    history_messages = []
+    if turns:
+        history_header = f"📜 *Histórico recente da conversa retomada ({len(turns)} turno{'s' if len(turns) > 1 else ''}):*"
+        history_messages.append(history_header)
+        for i, turn in enumerate(turns, 1):
+            u_text = turn["user"]
+            if len(u_text) > 500:
+                u_text = u_text[:497] + "..."
+            a_text = turn["assistant"]
+            if len(a_text) > 1400:
+                a_text = a_text[:1397] + "...\n_(resposta truncada para exibição)_"
+            tools_line = f"\n_🔧 Ferramentas: {', '.join(turn['tools'])}_" if turn.get("tools") else ""
+            block = f"👤 **Você:**\n{u_text}\n\n🤖 **Antigravity:**\n{a_text}{tools_line}"
+            history_messages.append(block)
+
+    # Send messages based on origin
+    if is_general:
+        # In General topic: post history & confirmation to target topic, reply briefly in General
+        if target_topic_id and FORUM_GROUP_ID:
+            for h_msg in history_messages:
+                await safe_send(context.bot, FORUM_GROUP_ID, h_msg, thread_id=target_topic_id)
+            await safe_send(context.bot, FORUM_GROUP_ID, confirm_text, thread_id=target_topic_id)
+            await unpin_topic_messages_quietly(context.bot, FORUM_GROUP_ID, target_topic_id)
+
+            if created_new_topic:
+                await safe_reply(msg, f"🔄 Conversa do PC conectada no novo tópico **{topic_name}**!\nEnvie suas mensagens por lá.")
+            else:
+                await safe_reply(msg, f"🔄 Conversa conectada no tópico dedicado existente (ID: `{target_topic_id}`)!\nEnvie suas mensagens por lá.")
+        else:
+            await safe_reply(msg, confirm_text)
+
+    elif is_private:
+        # In Private DM: send confirmation and history directly to user
+        await safe_reply(msg, confirm_text)
+        for h_msg in history_messages:
+            await safe_reply(msg, h_msg)
+
+        # Mirror/initialize topic in forum supergroup if newly created
+        if FORUM_GROUP_ID and target_topic_id and created_new_topic:
+            await safe_send(
+                context.bot,
+                FORUM_GROUP_ID,
+                f"✨ **Conversa importada do PC CLI conectada via chat privado.**\n`{cid}`",
+                thread_id=target_topic_id,
+            )
+            for h_msg in history_messages:
+                await safe_send(context.bot, FORUM_GROUP_ID, h_msg, thread_id=target_topic_id)
+            await unpin_topic_messages_quietly(context.bot, FORUM_GROUP_ID, target_topic_id)
+
+    else:
+        # Inside existing topic: reply right here
+        await safe_reply(msg, confirm_text)
+        for h_msg in history_messages:
+            await safe_reply(msg, h_msg)
+        if target_topic_id:
+            await unpin_topic_messages_quietly(context.bot, chat.id, target_topic_id)
 
 
 class SuffixCommandHandler(CommandHandler):

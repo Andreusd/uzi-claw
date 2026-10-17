@@ -474,6 +474,95 @@ class TestForumTopics(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(topic_send_calls), 1)
 
+    def test_resume_reuses_existing_topic_without_creating(self):
+        """When resuming a conversation that already has a forum topic, do NOT create a new one."""
+        from src.handlers.commands import cmd_resume
+
+        chat = MagicMock(type="private", id=740821374)
+        msg = MagicMock(message_thread_id=None, is_topic_message=False)
+        msg.reply_text = AsyncMock()
+        user = DummyUser(740821374, username="andreusd")
+        update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
+
+        # Set an existing topic in DB for cid "conv-test-exists"
+        target_cid = "conv-test-exists"
+        s = session_manager.get_session(-1004330361961, 888)
+        s.conversation_id = target_cid
+        session_manager.save_session(s)
+
+        bot_mock = MagicMock()
+        bot_mock.create_forum_topic = AsyncMock()
+        bot_mock.send_message = AsyncMock()
+        context = MagicMock(bot=bot_mock, args=[target_cid])
+
+        with patch("src.auth.is_user_authorized", return_value=True), \
+             patch("src.handlers.commands.FORUM_GROUP_ID", -1004330361961):
+            asyncio.run(cmd_resume(update, context))
+
+        # create_forum_topic MUST NOT be called because topic 888 already existed
+        bot_mock.create_forum_topic.assert_not_called()
+
+        # Session should be linked to topic 888
+        priv_session = session_manager.get_session(740821374, None)
+        self.assertEqual(priv_session.conversation_id, target_cid)
+        self.assertEqual(priv_session.forum_topic_id, 888)
+
+    def test_resume_creates_topic_when_none_exists(self):
+        """When resuming a conversation with NO existing topic, create one in FORUM_GROUP_ID."""
+        from src.handlers.commands import cmd_resume
+
+        chat = MagicMock(type="private", id=740821374)
+        msg = MagicMock(message_thread_id=None, is_topic_message=False)
+        msg.reply_text = AsyncMock()
+        user = DummyUser(740821374, username="andreusd")
+        update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
+
+        target_cid = "conv-pc-only-1234"
+        bot_mock = MagicMock()
+        dummy_topic = DummyForumTopic(message_thread_id=999, name="💻 PC CLI: Test")
+        bot_mock.create_forum_topic = AsyncMock(return_value=dummy_topic)
+        bot_mock.send_message = AsyncMock()
+        bot_mock.unpin_all_forum_topic_messages = AsyncMock()
+        context = MagicMock(bot=bot_mock, args=[target_cid])
+
+        with patch("src.auth.is_user_authorized", return_value=True), \
+             patch("src.handlers.commands.FORUM_GROUP_ID", -1004330361961), \
+             patch.object(session_manager, "find_topic_for_conversation", return_value=None), \
+             patch.object(session_manager, "get_conversation_turns", return_value=[{"user": "hello pc", "assistant": "hi there", "tools": []}]):
+            asyncio.run(cmd_resume(update, context))
+
+        # create_forum_topic MUST be called because no topic existed
+        bot_mock.create_forum_topic.assert_called_once()
+        priv_session = session_manager.get_session(740821374, None)
+        self.assertEqual(priv_session.conversation_id, target_cid)
+        self.assertEqual(priv_session.forum_topic_id, 999)
+
+        # History should have been replied to user
+        self.assertTrue(msg.reply_text.called)
+
+    def test_resume_in_existing_topic_does_not_create(self):
+        """When /resume is sent inside an existing forum topic, NEVER create a new topic."""
+        from src.handlers.commands import cmd_resume
+
+        chat = MagicMock(type="supergroup", is_forum=True, id=-1004330361961)
+        msg = MagicMock(message_thread_id=77, is_topic_message=True)
+        msg.reply_text = AsyncMock()
+        user = DummyUser(740821374, username="andreusd")
+        update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
+
+        bot_mock = MagicMock()
+        bot_mock.create_forum_topic = AsyncMock()
+        bot_mock.unpin_all_forum_topic_messages = AsyncMock()
+        context = MagicMock(bot=bot_mock, args=["conv-test-xyz"])
+
+        with patch("src.auth.is_user_authorized", return_value=True), \
+             patch("src.handlers.commands.FORUM_GROUP_ID", -1004330361961):
+            asyncio.run(cmd_resume(update, context))
+
+        bot_mock.create_forum_topic.assert_not_called()
+        topic_session = session_manager.get_session(-1004330361961, 77)
+        self.assertEqual(topic_session.conversation_id, "conv-test-xyz")
+
 
 if __name__ == "__main__":
     unittest.main()
