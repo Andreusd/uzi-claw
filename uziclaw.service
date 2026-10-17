@@ -11,6 +11,9 @@ Restart=always
 RestartSec=5s
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SSH_AUTH_SOCK=%t/gcr/ssh
+Environment=GIT_TERMINAL_PROMPT=0
+PassEnvironment=SSH_AUTH_SOCK
 
 [Install]
 WantedBy=default.target
