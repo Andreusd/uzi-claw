@@ -53,6 +53,8 @@ from .handlers import (
     cmd_mode,
     cmd_recent,
     cmd_resume,
+    cmd_restart,
+    cmd_shutdown,
     handle_unknown_command,
     SuffixCommandHandler,
     ResumeCommandHandler,
@@ -131,14 +133,14 @@ def create_application() -> Application:
     load_auth_fn()
 
     request_cfg = HTTPXRequest(
-        connection_pool_size=256,
+        connection_pool_size=32,
         connect_timeout=15.0,
         read_timeout=30.0,
         write_timeout=20.0,
         media_write_timeout=60.0,
     )
     get_updates_cfg = HTTPXRequest(
-        connection_pool_size=64,
+        connection_pool_size=16,
         connect_timeout=15.0,
         read_timeout=60.0,
         write_timeout=20.0,
@@ -182,6 +184,11 @@ def create_application() -> Application:
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("recent", cmd_recent))
     app.add_handler(ResumeCommandHandler(cmd_resume))
+    app.add_handler(CommandHandler("restart", cmd_restart))
+    app.add_handler(CommandHandler("reiniciar", cmd_restart))
+    app.add_handler(CommandHandler("shutdown", cmd_shutdown))
+    app.add_handler(CommandHandler("desligar", cmd_shutdown))
+    app.add_handler(CommandHandler("stop", cmd_shutdown))
 
     # General text and media messages (photos, voice notes, audio, documents)
     media_filters = (
@@ -225,6 +232,8 @@ __all__ = [
     "cmd_mode",
     "cmd_recent",
     "cmd_resume",
+    "cmd_restart",
+    "cmd_shutdown",
     "handle_unknown_command",
     "SuffixCommandHandler",
     "ResumeCommandHandler",

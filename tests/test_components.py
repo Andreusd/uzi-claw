@@ -1089,6 +1089,35 @@ x < 10 && y > 20
             if img is not None:
                 self.assertEqual(img.size, (64, 64))
 
+    def test_cmd_restart_and_shutdown(self):
+        from src.handlers.commands import cmd_restart, cmd_shutdown
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        async def run_test():
+            msg = MagicMock()
+            msg.reply_text = AsyncMock()
+            chat = MagicMock(type="private")
+            user = DummyUser(12345, username="admin")
+            update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
+            context = MagicMock()
+
+            with patch("src.auth.is_user_authorized", return_value=True), \
+                 patch("subprocess.Popen"), \
+                 patch("asyncio.sleep", new_callable=AsyncMock):
+
+                # 1. Test cmd_restart
+                await cmd_restart(update, context)
+                msg.reply_text.assert_called()
+                self.assertIn("Reiniciando UziClaw", msg.reply_text.call_args[0][0])
+
+                # 2. Test cmd_shutdown
+                msg.reply_text.reset_mock()
+                await cmd_shutdown(update, context)
+                msg.reply_text.assert_called()
+                self.assertIn("Desligando UziClaw", msg.reply_text.call_args[0][0])
+
+        asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()

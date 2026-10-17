@@ -8,3 +8,11 @@ authorized_users.txt
 data/
 *.db
 *.sqlite
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

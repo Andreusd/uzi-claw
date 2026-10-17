@@ -1,14 +1,15 @@
-"""Administrative, session, and utility command handlers for UziClaw."""
-
+import asyncio
 import functools
 import logging
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from telegram import Update, BotCommand, BotCommandScopeChat, MessageEntity
 from telegram.ext import CommandHandler, ContextTypes
 
-from ..config import AGY_BIN_PATH, FORUM_GROUP_ID
+from ..config import AGY_BIN_PATH, FORUM_GROUP_ID, PROJECT_ROOT
 from ..auth import restricted
 from ..session_manager import session_manager, SessionState
 from ..formatters import safe_reply, safe_send, safe_edit, format_usage_data
@@ -62,6 +63,8 @@ BOT_COMMANDS = [
     BotCommand("cd", "Change working directory"),
     BotCommand("autopilot", "Toggle tool auto-approval (on/off)"),
     BotCommand("mode", "Set execution mode (plan/accept-edits/clear)"),
+    BotCommand("restart", "Restart UziClaw service"),
+    BotCommand("shutdown", "Stop/shutdown UziClaw service completely"),
     BotCommand("id", "Show numeric Telegram User ID"),
     BotCommand("help", "Show help and command guide"),
 ]
@@ -789,3 +792,57 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
         await execute_terminal_command(update, context, msg.text.strip())
     else:
         await safe_reply(msg, "❓ Unknown command. Send /help for available commands.")
+
+
+@restricted
+async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Restart the UziClaw service."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    user = update.effective_user
+    user_str = f"id={user.id} (@{user.username})" if user else "unknown"
+    logger.info("Restart requested by authorized user %s", user_str)
+    await safe_reply(msg, "🔄 **Reiniciando UziClaw...**\nO serviço está sendo reiniciado e voltará em instantes.")
+
+    async def _do_restart():
+        await asyncio.sleep(1.0)
+        if sys.platform != "win32":
+            subprocess.Popen(["systemctl", "--user", "restart", "uziclaw.service"])
+        else:
+            cmd = [sys.executable, str(PROJECT_ROOT / "main.py")]
+            subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
+            sys.exit(0)
+
+    asyncio.create_task(_do_restart())
+
+
+@restricted
+async def cmd_shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Completely stop/shutdown the UziClaw service."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    user = update.effective_user
+    user_str = f"id={user.id} (@{user.username})" if user else "unknown"
+    logger.info("Shutdown requested by authorized user %s", user_str)
+    await safe_reply(
+        msg,
+        "🛑 **Desligando UziClaw...**\n\n"
+        "O serviço foi parado completamente e não responderá mais no Telegram.\n"
+        "Para iniciá-lo novamente, execute manualmente no terminal da máquina física:\n"
+        "```bash\n"
+        "systemctl --user start uziclaw.service\n"
+        "```",
+    )
+
+    async def _do_shutdown():
+        await asyncio.sleep(1.0)
+        if sys.platform != "win32":
+            subprocess.Popen(["systemctl", "--user", "stop", "uziclaw.service"])
+        else:
+            sys.exit(0)
+
+    asyncio.create_task(_do_shutdown())

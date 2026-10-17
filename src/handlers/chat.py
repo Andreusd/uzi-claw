@@ -20,6 +20,7 @@ from ..formatters import (
     RateLimitedMessageUpdater,
     LiveStatusTracker,
 )
+from ..tray import notify_tray_state_changed
 from ..media_manager import download_telegram_file_with_retry
 from .commands import get_session_from_update
 from .forum_helper import (
@@ -391,6 +392,7 @@ async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT
 
     session.is_busy = True
     session.cancel_requested = False
+    notify_tray_state_changed()
     try:
         cmd_preview = command if len(command) <= 50 else command[:47] + "..."
         status_msg = await safe_reply(msg, f"💻 `$ {cmd_preview}`\n⏳ _Running..._")
@@ -428,6 +430,7 @@ async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT
     finally:
         if session.terminal_runner is current_terminal_runner:
             session.is_busy = False
+            notify_tray_state_changed()
 
 
 @restricted
@@ -498,6 +501,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             session.is_busy = True
             session.cancel_requested = False
             current_runner = session.runner
+            notify_tray_state_changed()
             try:
                 # Extract prompt text and handle media downloads
                 try:
@@ -677,6 +681,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             finally:
                 if session.runner is current_runner:
                     session.is_busy = False
+                    notify_tray_state_changed()
     finally:
         if not acquired:
             session.queued_count = max(0, session.queued_count - 1)

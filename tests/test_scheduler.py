@@ -298,7 +298,7 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
     async def test_scheduler_service_creates_forum_topic_in_forum_supergroup(self):
         """Verify execute_job creates dedicated topic when running in FORUM_GROUP_ID."""
         from src.config import FORUM_GROUP_ID
-        chat_id = FORUM_GROUP_ID if FORUM_GROUP_ID else -1004330361961
+        chat_id = FORUM_GROUP_ID if FORUM_GROUP_ID else -1001234567890
 
         job = self.store.add_schedule(
             chat_id=chat_id,

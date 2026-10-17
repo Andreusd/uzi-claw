@@ -406,6 +406,7 @@ class SchedulerService:
         self._session_manager = None
         self._active_runners: Dict[int, AntigravityRunner] = {}
         self._active_job_threads: Dict[int, tuple[int, Optional[int]]] = {}
+        self._last_media_cleanup: float = 0.0
 
     def create_runner(self) -> AntigravityRunner:
         """Create a dedicated AntigravityRunner instance for background task isolation."""
@@ -467,6 +468,16 @@ class SchedulerService:
     async def _run_loop(self) -> None:
         """Main evaluation loop."""
         while self._running:
+            now = time.time()
+            # Periodically clean up expired media files every 6 hours
+            if now - self._last_media_cleanup > 21600.0:
+                self._last_media_cleanup = now
+                try:
+                    from .media_manager import cleanup_old_media
+                    cleanup_old_media()
+                except Exception as e:
+                    logger.debug("Periodic media cleanup failed: %s", e)
+
             try:
                 await self._check_and_trigger_due_jobs()
             except asyncio.CancelledError:

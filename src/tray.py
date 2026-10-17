@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 import logging
 import threading
 import subprocess
@@ -330,7 +331,7 @@ if HAS_DBUS:
 
 
     class TelegramBridgeTrayApp:
-        """Controller for the D-Bus system tray indicator."""
+        """Controller for the D-Bus system tray indicator with adaptive polling and screensaver awareness."""
 
         def __init__(self, session_manager=None):
             self.session_manager = session_manager
@@ -346,18 +347,101 @@ if HAS_DBUS:
                 self.bus,
             )
 
+            self.is_registered = False
+            self._last_register_attempt = 0.0
+            self._timer_id = None
+            self._is_screen_locked = False
+
+            self._setup_screensaver_listener()
             self.register_tray()
             self.refresh_state()
 
-            # Poll every 2 seconds for state changes
-            GLib.timeout_add_seconds(2, self.periodic_check)
+            # Schedule adaptive polling
+            self._schedule_next(immediate=False)
+
+        def _setup_screensaver_listener(self):
+            """Listen to screensaver signals to sleep while screen is locked and wake immediately on unlock."""
+            try:
+                for iface in ("org.gnome.ScreenSaver", "org.freedesktop.ScreenSaver"):
+                    try:
+                        self.bus.add_signal_receiver(
+                            self._on_screensaver_active_changed,
+                            signal_name="ActiveChanged",
+                            dbus_interface=iface,
+                        )
+                    except Exception:
+                        pass
+                self._is_screen_locked = self._check_screen_locked()
+            except Exception as e:
+                logger.debug("Could not setup screensaver listener: %s", e)
+
+        def _check_screen_locked(self) -> bool:
+            """Check if the screen is currently locked/asleep."""
+            for iface in ("org.gnome.ScreenSaver", "org.freedesktop.ScreenSaver"):
+                try:
+                    obj = self.bus.get_object(iface, f"/{iface.replace('.', '/')}")
+                    return bool(obj.GetActive(dbus_interface=iface))
+                except Exception:
+                    continue
+            return False
+
+        def _on_screensaver_active_changed(self, active: bool):
+            """D-Bus callback when screen lock state toggles."""
+            self._is_screen_locked = bool(active)
+            logger.debug("Screensaver ActiveChanged: %s", self._is_screen_locked)
+            if not self._is_screen_locked:
+                self.refresh_state()
+            self._schedule_next(immediate=False)
+
+        def trigger_update(self):
+            """Thread-safe trigger to refresh state immediately from external worker threads."""
+            try:
+                GLib.idle_add(self._on_triggered_update)
+            except Exception:
+                pass
+
+        def _on_triggered_update(self):
+            self.refresh_state()
+            self._schedule_next(immediate=False)
+            return False
+
+        def _schedule_next(self, immediate: bool = False):
+            """Schedule next check with adaptive interval."""
+            if self._timer_id is not None:
+                try:
+                    GLib.source_remove(self._timer_id)
+                except Exception:
+                    pass
+                self._timer_id = None
+
+            if immediate:
+                self._timer_id = GLib.idle_add(self._on_timer_tick)
+                return
+
+            if self._is_screen_locked or self._check_screen_locked():
+                self._is_screen_locked = True
+                interval = 30  # Screen is locked/off: poll very lazily
+            else:
+                self._is_screen_locked = False
+                is_running, _, _ = self.get_activity_status()
+                interval = 2 if is_running else 10  # 2s if task running, 10s if idle
+
+            self._timer_id = GLib.timeout_add_seconds(interval, self._on_timer_tick)
+
+        def _on_timer_tick(self):
+            self.periodic_check()
+            self._schedule_next(immediate=False)
+            return False
 
         def register_tray(self):
+            self._last_register_attempt = time.time()
             try:
                 watcher = self.bus.get_object("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher")
                 watcher.RegisterStatusNotifierItem("/StatusNotifierItem", dbus_interface="org.kde.StatusNotifierWatcher")
+                self.is_registered = True
                 logger.info("Registered Telegram Bridge tray with StatusNotifierWatcher")
             except Exception as e:
+                self.is_registered = False
                 logger.warning("Could not register with StatusNotifierWatcher: %s", e)
 
         def get_activity_status(self) -> tuple[bool, str, dict]:
@@ -401,11 +485,16 @@ if HAS_DBUS:
                 title = "UziClaw: Online"
 
             icon_changed = self.sni.update_icon(icon, title)
-            if icon_changed or True:
+            if icon_changed:
                 self.menu.notify_update()
 
         def periodic_check(self):
-            self.refresh_state()
+            now = time.time()
+            if not self.is_registered and (now - self._last_register_attempt > 60.0):
+                self.register_tray()
+
+            if not self._is_screen_locked:
+                self.refresh_state()
             return True
 
         def interrupt_current_task(self):
@@ -445,6 +534,14 @@ if HAS_DBUS:
         def stop_service(self):
             logger.info("Tray clicked: Stopping uziclaw.service")
             subprocess.Popen(["systemctl", "--user", "stop", "uziclaw.service"])
+
+        def stop(self):
+            if self._timer_id is not None:
+                try:
+                    GLib.source_remove(self._timer_id)
+                except Exception:
+                    pass
+                self._timer_id = None
 
         def run(self):
             loop = GLib.MainLoop()
@@ -580,6 +677,10 @@ class WindowsTrayManager:
             except Exception:
                 pass
 
+    def trigger_update(self) -> None:
+        """Trigger update on Windows tray if needed."""
+        pass
+
     def stop(self) -> None:
         """Stop and remove the tray icon."""
         if self._icon and self._is_running:
@@ -598,6 +699,13 @@ SystemTrayManager = WindowsTrayManager
 tray_manager = WindowsTrayManager()
 
 _active_tray_instance = None
+
+
+def notify_tray_state_changed() -> None:
+    """Thread-safe trigger to immediately refresh the tray icon and state."""
+    global _active_tray_instance
+    if _active_tray_instance and hasattr(_active_tray_instance, "trigger_update"):
+        _active_tray_instance.trigger_update()
 
 
 def start_tray_in_background(session_manager=None):

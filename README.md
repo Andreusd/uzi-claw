@@ -150,4 +150,6 @@ systemctl --user restart uziclaw.service
 | `/mode <plan\|accept-edits\|clear>` | Sets the agent execution mode |
 | `/recent` | Lists recent CLI conversations with live 🟢 `[Running]` indicators and clickable `/resume_1` links |
 | `/resume [id\|number]` | Resumes conversation by ID or index from `/recent`; lists chats if invoked without arguments |
+| `/restart` | Restarts the UziClaw service cleanly (alias: `/reiniciar`) |
+| `/shutdown` | Stops / shuts down the UziClaw service completely (alias: `/desligar`, `/stop`); requires physical host terminal access to restart |
 | `/help` | Displays available commands |

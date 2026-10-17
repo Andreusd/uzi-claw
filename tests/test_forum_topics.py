@@ -39,7 +39,7 @@ class TestForumTopics(unittest.TestCase):
     def setUp(self):
         # Reset in-memory sessions for clean tests
         session_manager._sessions.clear()
-        s = session_manager.get_session(740821374, None)
+        s = session_manager.get_session(123456789, None)
         s.forum_topic_id = None
         s.conversation_id = None
         session_manager.save_session(s)
@@ -158,7 +158,7 @@ class TestForumTopics(unittest.TestCase):
         """Test that a message sent in General topic creates a new topic and never replies to General."""
         from src.handlers.chat import handle_message
 
-        chat = MagicMock(type="supergroup", is_forum=True, id=-1004330361961)
+        chat = MagicMock(type="supergroup", is_forum=True, id=-1001234567890)
         msg = MagicMock(text="Create a new microservice", message_thread_id=None, is_topic_message=False)
         msg.reply_text = AsyncMock()
         msg.photo = []
@@ -166,7 +166,7 @@ class TestForumTopics(unittest.TestCase):
         msg.audio = None
         msg.document = None
 
-        user = DummyUser(740821374, username="andreusd")
+        user = DummyUser(123456789, username="testuser")
         update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
 
         bot_mock = MagicMock()
@@ -192,7 +192,7 @@ class TestForumTopics(unittest.TestCase):
         # 1. create_forum_topic was called in the supergroup
         bot_mock.create_forum_topic.assert_called_once()
         call_kwargs = bot_mock.create_forum_topic.call_args[1]
-        self.assertEqual(call_kwargs["chat_id"], -1004330361961)
+        self.assertEqual(call_kwargs["chat_id"], -1001234567890)
 
         # 2. msg.reply_text was NEVER called (zero replies in General!)
         msg.reply_text.assert_not_called()
@@ -202,14 +202,14 @@ class TestForumTopics(unittest.TestCase):
         self.assertTrue(any(c[1].get("message_thread_id") == 888 for c in send_calls))
 
         # 4. Session for (chat.id, 888) was saved with the conversation_id
-        session = session_manager.get_session(-1004330361961, 888)
+        session = session_manager.get_session(-1001234567890, 888)
         self.assertEqual(session.conversation_id, "conv-general-123")
 
     def test_private_chat_creates_topic_and_mirrors_response(self):
         """Test that in private DM, responses are sent to private AND mirrored to linked topic."""
         from src.handlers.chat import handle_message
 
-        chat = MagicMock(type="private", is_forum=False, id=740821374)
+        chat = MagicMock(type="private", is_forum=False, id=123456789)
         msg = MagicMock(text="Refactor authentication system", message_thread_id=None, is_topic_message=False)
         private_status_msg = MagicMock()
         private_status_msg.edit_text = AsyncMock()
@@ -219,7 +219,7 @@ class TestForumTopics(unittest.TestCase):
         msg.audio = None
         msg.document = None
 
-        user = DummyUser(740821374, username="andreusd")
+        user = DummyUser(123456789, username="testuser")
         update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
 
         bot_mock = MagicMock()
@@ -230,7 +230,7 @@ class TestForumTopics(unittest.TestCase):
         context = MagicMock(bot=bot_mock)
 
         with patch("src.auth.is_user_authorized", return_value=True), \
-             patch("src.handlers.chat.FORUM_GROUP_ID", -1004330361961), \
+             patch("src.handlers.chat.FORUM_GROUP_ID", -1001234567890), \
              patch("src.antigravity_runner.AntigravityRunner.run", new_callable=AsyncMock) as mock_runner_run:
             mock_runner_run.return_value = {
                 "status": "SUCCESS",
@@ -242,7 +242,7 @@ class TestForumTopics(unittest.TestCase):
 
         # 1. Topic was created in FORUM_GROUP_ID
         bot_mock.create_forum_topic.assert_called_once_with(
-            chat_id=-1004330361961,
+            chat_id=-1001234567890,
             name="💬 Refactor authentication system",
             icon_custom_emoji_id="5417915203100613993",
         )
@@ -259,7 +259,7 @@ class TestForumTopics(unittest.TestCase):
         self.assertGreaterEqual(len(topic_send_calls), 1)
 
         # 4. Private session has forum_topic_id set
-        session = session_manager.get_session(740821374, None)
+        session = session_manager.get_session(123456789, None)
         self.assertEqual(session.forum_topic_id, 999)
         self.assertEqual(session.conversation_id, "conv-private-456")
 
@@ -267,10 +267,10 @@ class TestForumTopics(unittest.TestCase):
         """Test that /new in General topic creates a new topic and never posts to General."""
         from src.handlers.commands import cmd_new
 
-        chat = MagicMock(type="supergroup", is_forum=True, id=-1004330361961)
+        chat = MagicMock(type="supergroup", is_forum=True, id=-1001234567890)
         msg = MagicMock(text="/new", message_thread_id=None, is_topic_message=False)
         msg.reply_text = AsyncMock()
-        user = DummyUser(740821374, username="andreusd")
+        user = DummyUser(123456789, username="testuser")
         update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
 
         bot_mock = MagicMock()
@@ -296,10 +296,10 @@ class TestForumTopics(unittest.TestCase):
         """Test that /new in private DM creates a topic in forum group and notifies both."""
         from src.handlers.commands import cmd_new
 
-        chat = MagicMock(type="private", is_forum=False, id=740821374)
+        chat = MagicMock(type="private", is_forum=False, id=123456789)
         msg = MagicMock(text="/new", message_thread_id=None, is_topic_message=False)
         msg.reply_text = AsyncMock()
-        user = DummyUser(740821374, username="andreusd")
+        user = DummyUser(123456789, username="testuser")
         update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
 
         bot_mock = MagicMock()
@@ -309,12 +309,12 @@ class TestForumTopics(unittest.TestCase):
         context = MagicMock(bot=bot_mock)
 
         with patch("src.auth.is_user_authorized", return_value=True), \
-             patch("src.handlers.commands.FORUM_GROUP_ID", -1004330361961):
+             patch("src.handlers.commands.FORUM_GROUP_ID", -1001234567890):
             asyncio.run(cmd_new(update, context))
 
         # 1. Topic created in FORUM_GROUP_ID
         bot_mock.create_forum_topic.assert_called_once()
-        self.assertEqual(bot_mock.create_forum_topic.call_args[1]["chat_id"], -1004330361961)
+        self.assertEqual(bot_mock.create_forum_topic.call_args[1]["chat_id"], -1001234567890)
 
         # 2. User received confirmation in private
         msg.reply_text.assert_called_once()
@@ -325,7 +325,7 @@ class TestForumTopics(unittest.TestCase):
         self.assertEqual(bot_mock.send_message.call_args[1]["message_thread_id"], 555)
 
         # 4. Private session forum_topic_id is updated to 555 and conversation_id is None
-        session = session_manager.get_session(740821374, None)
+        session = session_manager.get_session(123456789, None)
         self.assertEqual(session.forum_topic_id, 555)
         self.assertIsNone(session.conversation_id)
 
@@ -333,10 +333,10 @@ class TestForumTopics(unittest.TestCase):
         """Test that administrative commands like /status and /recent in General reply directly in General without creating topics."""
         from src.handlers.commands import cmd_status
 
-        chat = MagicMock(type="supergroup", is_forum=True, id=-1004330361961)
+        chat = MagicMock(type="supergroup", is_forum=True, id=-1001234567890)
         msg = MagicMock(text="/status", message_thread_id=None, is_topic_message=False)
         msg.reply_text = AsyncMock()
-        user = DummyUser(740821374, username="andreusd")
+        user = DummyUser(123456789, username="testuser")
         update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
 
         bot_mock = MagicMock()
@@ -365,7 +365,7 @@ class TestForumTopics(unittest.TestCase):
         res = asyncio.run(
             create_forum_topic_with_retry(
                 bot=bot_mock,
-                chat_id=-1004330361961,
+                chat_id=-1001234567890,
                 name="Test Topic",
                 max_retries=3,
                 initial_delay=0.01,
@@ -385,7 +385,7 @@ class TestForumTopics(unittest.TestCase):
         res = asyncio.run(
             create_forum_topic_with_retry(
                 bot=bot_mock,
-                chat_id=-1004330361961,
+                chat_id=-1001234567890,
                 name="Test Topic",
                 max_retries=2,
                 initial_delay=0.01,
@@ -418,7 +418,7 @@ class TestForumTopics(unittest.TestCase):
         """Test that if a forum topic was already pre-created (e.g. by /new), the first message renames it rather than creating a duplicate."""
         from src.handlers.chat import handle_message
 
-        chat = MagicMock(type="private", is_forum=False, id=740821374)
+        chat = MagicMock(type="private", is_forum=False, id=123456789)
         msg = MagicMock(text="Você está bem?", message_thread_id=None, is_topic_message=False)
         private_status_msg = MagicMock()
         private_status_msg.edit_text = AsyncMock()
@@ -428,11 +428,11 @@ class TestForumTopics(unittest.TestCase):
         msg.audio = None
         msg.document = None
 
-        user = DummyUser(740821374, username="andreusd")
+        user = DummyUser(123456789, username="testuser")
         update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
 
         # Pre-set session as if /new was called: forum_topic_id is set, conversation_id is None
-        session = session_manager.get_session(740821374, None)
+        session = session_manager.get_session(123456789, None)
         session.forum_topic_id = 555
         session.conversation_id = None
         session_manager.save_session(session)
@@ -445,7 +445,7 @@ class TestForumTopics(unittest.TestCase):
         context = MagicMock(bot=bot_mock)
 
         with patch("src.auth.is_user_authorized", return_value=True), \
-             patch("src.handlers.chat.FORUM_GROUP_ID", -1004330361961), \
+             patch("src.handlers.chat.FORUM_GROUP_ID", -1001234567890), \
              patch("src.antigravity_runner.AntigravityRunner.run", new_callable=AsyncMock) as mock_runner_run:
             mock_runner_run.return_value = {
                 "status": "SUCCESS",
@@ -460,7 +460,7 @@ class TestForumTopics(unittest.TestCase):
 
         # 2. edit_forum_topic MUST be called to rename the pre-existing topic 555
         bot_mock.edit_forum_topic.assert_called_once()
-        self.assertEqual(bot_mock.edit_forum_topic.call_args[1]["chat_id"], -1004330361961)
+        self.assertEqual(bot_mock.edit_forum_topic.call_args[1]["chat_id"], -1001234567890)
         self.assertEqual(bot_mock.edit_forum_topic.call_args[1]["message_thread_id"], 555)
         self.assertIn("Você está bem?", bot_mock.edit_forum_topic.call_args[1]["name"])
 
@@ -475,15 +475,15 @@ class TestForumTopics(unittest.TestCase):
         """When resuming a conversation that already has a forum topic, do NOT create a new one."""
         from src.handlers.commands import cmd_resume
 
-        chat = MagicMock(type="private", id=740821374)
+        chat = MagicMock(type="private", id=123456789)
         msg = MagicMock(message_thread_id=None, is_topic_message=False)
         msg.reply_text = AsyncMock()
-        user = DummyUser(740821374, username="andreusd")
+        user = DummyUser(123456789, username="testuser")
         update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
 
         # Set an existing topic in DB for cid "conv-test-exists"
         target_cid = "conv-test-exists"
-        s = session_manager.get_session(-1004330361961, 888)
+        s = session_manager.get_session(-1001234567890, 888)
         s.conversation_id = target_cid
         session_manager.save_session(s)
 
@@ -493,14 +493,14 @@ class TestForumTopics(unittest.TestCase):
         context = MagicMock(bot=bot_mock, args=[target_cid])
 
         with patch("src.auth.is_user_authorized", return_value=True), \
-             patch("src.handlers.commands.FORUM_GROUP_ID", -1004330361961):
+             patch("src.handlers.commands.FORUM_GROUP_ID", -1001234567890):
             asyncio.run(cmd_resume(update, context))
 
         # create_forum_topic MUST NOT be called because topic 888 already existed
         bot_mock.create_forum_topic.assert_not_called()
 
         # Session should be linked to topic 888
-        priv_session = session_manager.get_session(740821374, None)
+        priv_session = session_manager.get_session(123456789, None)
         self.assertEqual(priv_session.conversation_id, target_cid)
         self.assertEqual(priv_session.forum_topic_id, 888)
 
@@ -508,10 +508,10 @@ class TestForumTopics(unittest.TestCase):
         """When resuming a conversation with NO existing topic, create one in FORUM_GROUP_ID."""
         from src.handlers.commands import cmd_resume
 
-        chat = MagicMock(type="private", id=740821374)
+        chat = MagicMock(type="private", id=123456789)
         msg = MagicMock(message_thread_id=None, is_topic_message=False)
         msg.reply_text = AsyncMock()
-        user = DummyUser(740821374, username="andreusd")
+        user = DummyUser(123456789, username="testuser")
         update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
 
         target_cid = "conv-pc-only-1234"
@@ -523,14 +523,14 @@ class TestForumTopics(unittest.TestCase):
         context = MagicMock(bot=bot_mock, args=[target_cid])
 
         with patch("src.auth.is_user_authorized", return_value=True), \
-             patch("src.handlers.commands.FORUM_GROUP_ID", -1004330361961), \
+             patch("src.handlers.commands.FORUM_GROUP_ID", -1001234567890), \
              patch.object(session_manager, "find_topic_for_conversation", return_value=None), \
              patch.object(session_manager, "get_conversation_turns", return_value=[{"user": "hello pc", "assistant": "hi there", "tools": []}]):
             asyncio.run(cmd_resume(update, context))
 
         # create_forum_topic MUST be called because no topic existed
         bot_mock.create_forum_topic.assert_called_once()
-        priv_session = session_manager.get_session(740821374, None)
+        priv_session = session_manager.get_session(123456789, None)
         self.assertEqual(priv_session.conversation_id, target_cid)
         self.assertEqual(priv_session.forum_topic_id, 999)
 
@@ -541,10 +541,10 @@ class TestForumTopics(unittest.TestCase):
         """When /resume is sent inside an existing forum topic, NEVER create a new topic."""
         from src.handlers.commands import cmd_resume
 
-        chat = MagicMock(type="supergroup", is_forum=True, id=-1004330361961)
+        chat = MagicMock(type="supergroup", is_forum=True, id=-1001234567890)
         msg = MagicMock(message_thread_id=77, is_topic_message=True)
         msg.reply_text = AsyncMock()
-        user = DummyUser(740821374, username="andreusd")
+        user = DummyUser(123456789, username="testuser")
         update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
 
         bot_mock = MagicMock()
@@ -553,11 +553,11 @@ class TestForumTopics(unittest.TestCase):
         context = MagicMock(bot=bot_mock, args=["conv-test-xyz"])
 
         with patch("src.auth.is_user_authorized", return_value=True), \
-             patch("src.handlers.commands.FORUM_GROUP_ID", -1004330361961):
+             patch("src.handlers.commands.FORUM_GROUP_ID", -1001234567890):
             asyncio.run(cmd_resume(update, context))
 
         bot_mock.create_forum_topic.assert_not_called()
-        topic_session = session_manager.get_session(-1004330361961, 77)
+        topic_session = session_manager.get_session(-1001234567890, 77)
         self.assertEqual(topic_session.conversation_id, "conv-test-xyz")
 
 

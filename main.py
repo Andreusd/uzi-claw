@@ -12,15 +12,21 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.config import TELEGRAM_TOKEN, ENABLE_TRAY_ICON
 from src.session_manager import session_manager
 from src.tray import start_tray_in_background, stop_tray
+from logging.handlers import RotatingFileHandler
 from src.bot import create_application
 
 
 def setup_logging() -> None:
-    """Configure console and file logging."""
+    """Configure console and rotating file logging."""
     log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     handlers = [
         logging.StreamHandler(),
-        logging.FileHandler(PROJECT_ROOT / "bot.log", encoding="utf-8"),
+        RotatingFileHandler(
+            PROJECT_ROOT / "bot.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        ),
     ]
     logging.basicConfig(
         level=logging.INFO,
