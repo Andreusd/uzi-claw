@@ -329,8 +329,8 @@ class TestForumTopics(unittest.TestCase):
         self.assertEqual(session.forum_topic_id, 555)
         self.assertIsNone(session.conversation_id)
 
-    def test_command_in_general_redirected_to_new_topic(self):
-        """Test that administrative commands like /status in General redirect to a new topic."""
+    def test_command_in_general_replies_directly_without_creating_topic(self):
+        """Test that administrative commands like /status and /recent in General reply directly in General without creating topics."""
         from src.handlers.commands import cmd_status
 
         chat = MagicMock(type="supergroup", is_forum=True, id=-1004330361961)
@@ -340,21 +340,18 @@ class TestForumTopics(unittest.TestCase):
         update = MagicMock(effective_chat=chat, effective_message=msg, effective_user=user)
 
         bot_mock = MagicMock()
-        created_topic = DummyForumTopic(message_thread_id=333, name="🛠️ /status")
-        bot_mock.create_forum_topic = AsyncMock(return_value=created_topic)
-        bot_mock.send_message = AsyncMock()
+        bot_mock.create_forum_topic = AsyncMock()
         context = MagicMock(bot=bot_mock)
 
         with patch("src.auth.is_user_authorized", return_value=True):
             asyncio.run(cmd_status(update, context))
 
-        # 1. Topic created for the command
-        bot_mock.create_forum_topic.assert_called_once()
+        # 1. Topic MUST NOT be created for commands executed in General
+        bot_mock.create_forum_topic.assert_not_called()
 
-        # 2. Nothing sent directly to General (original reply_text was redirected)
-        # 3. Status was sent to the redirected topic (thread 333)
-        bot_mock.send_message.assert_called()
-        self.assertEqual(bot_mock.send_message.call_args[1]["message_thread_id"], 333)
+        # 2. Reply sent directly in General via msg.reply_text
+        msg.reply_text.assert_called_once()
+        self.assertIn("Status", msg.reply_text.call_args[0][0])
 
     def test_create_forum_topic_with_retry_recovers_from_transient_error(self):
         """Test that create_forum_topic_with_retry recovers after transient network error."""

@@ -29,42 +29,9 @@ logger = logging.getLogger(__name__)
 
 def general_topic_redirect(func):
     """
-    Ensure commands executed in the General topic of a forum supergroup create
-    a new dedicated forum topic and reply there, never replying in the General topic.
+    Legacy no-op decorator. Commands executed in the General topic are replied to directly in General.
     """
-    @functools.wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        chat = update.effective_chat
-        msg = update.effective_message
-        if is_forum_general_chat(chat, msg):
-            cmd_name = func.__name__.replace("cmd_", "")
-            now_str = datetime.now().strftime("%d/%m %H:%M")
-            topic_name = f"🛠️ /{cmd_name} {now_str}"
-            topic = await create_forum_topic_with_retry(
-                bot=context.bot,
-                chat_id=chat.id,
-                name=topic_name,
-                icon_custom_emoji_id=FORUM_TOPIC_ICONS["command"],
-            )
-            target_thread = getattr(topic, "message_thread_id", None)
-            if target_thread is None:
-                logger.error("Failed to create topic for /%s in General after retries", cmd_name)
-                return
-
-            orig_reply = msg.reply_text
-            async def redirected_reply(*r_args, **r_kwargs):
-                r_kwargs["message_thread_id"] = target_thread
-                sent = await context.bot.send_message(chat_id=chat.id, *r_args, **r_kwargs)
-                await unpin_topic_messages_quietly(context.bot, chat.id, target_thread)
-                return sent
-            msg.reply_text = redirected_reply
-            try:
-                return await func(update, context, *args, **kwargs)
-            finally:
-                msg.reply_text = orig_reply
-
-        return await func(update, context, *args, **kwargs)
-    return wrapper
+    return func
 
 
 def get_session_from_update(update: Update) -> SessionState:
@@ -72,8 +39,11 @@ def get_session_from_update(update: Update) -> SessionState:
     chat = update.effective_chat
     chat_id = chat.id if chat else 0
     msg = update.effective_message
-    raw_thread_id = getattr(msg, "message_thread_id", None) if msg else None
-    thread_id = raw_thread_id if isinstance(raw_thread_id, int) else None
+    if is_forum_general_chat(chat, msg):
+        thread_id = None
+    else:
+        raw_thread_id = getattr(msg, "message_thread_id", None) if msg else None
+        thread_id = raw_thread_id if isinstance(raw_thread_id, int) else None
     return session_manager.get_session(chat_id, thread_id)
 
 
@@ -98,7 +68,6 @@ BOT_COMMANDS = [
 
 
 @restricted
-@general_topic_redirect
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send welcome and overview message."""
     user = update.effective_user
@@ -135,14 +104,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @restricted
-@general_topic_redirect
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show detailed help message."""
     await cmd_start(update, context)
 
 
 @restricted
-@general_topic_redirect
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display active session status and environment."""
     msg = update.effective_message
@@ -189,7 +156,6 @@ def _get_usage_func():
 
 
 @restricted
-@general_topic_redirect
 async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show quota and usage limits equivalent to agy /usage."""
     msg = update.effective_message
@@ -225,7 +191,6 @@ async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @restricted
-@general_topic_redirect
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the sender's numeric Telegram User ID."""
     user = update.effective_user
@@ -459,7 +424,6 @@ async def cmd_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 @restricted
-@general_topic_redirect
 async def cmd_device(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display host device statistics including battery, CPU, RAM, disk, and uptime."""
     msg = update.effective_message
@@ -475,7 +439,6 @@ cmd_stats = cmd_device
 
 
 @restricted
-@general_topic_redirect
 async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Change the working directory."""
     msg = update.effective_message
@@ -500,7 +463,6 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @restricted
-@general_topic_redirect
 async def cmd_autopilot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Toggle tool auto-approval (--dangerously-skip-permissions)."""
     msg = update.effective_message
@@ -527,7 +489,6 @@ async def cmd_autopilot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 @restricted
-@general_topic_redirect
 async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Set execution mode: plan, accept-edits, or clear."""
     msg = update.effective_message
@@ -553,7 +514,6 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @restricted
-@general_topic_redirect
 async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List recent Antigravity CLI conversations."""
     msg = update.effective_message
@@ -816,7 +776,6 @@ class ResumeCommandHandler(SuffixCommandHandler):
 
 
 @restricted
-@general_topic_redirect
 async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fallback handler for commands starting with /."""
     msg = update.effective_message
