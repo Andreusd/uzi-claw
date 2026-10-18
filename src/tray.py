@@ -435,14 +435,21 @@ if HAS_DBUS:
 
         def register_tray(self):
             self._last_register_attempt = time.time()
-            try:
-                watcher = self.bus.get_object("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher")
-                watcher.RegisterStatusNotifierItem("/StatusNotifierItem", dbus_interface="org.kde.StatusNotifierWatcher")
-                self.is_registered = True
-                logger.info("Registered Telegram Bridge tray with StatusNotifierWatcher")
-            except Exception as e:
-                self.is_registered = False
-                logger.warning("Could not register with StatusNotifierWatcher: %s", e)
+            bus_service_name = self.bus_name.get_name()
+            for watcher_name in ["org.kde.StatusNotifierWatcher", "org.ayatana.StatusNotifierWatcher"]:
+                try:
+                    watcher = self.bus.get_object(watcher_name, "/StatusNotifierWatcher")
+                    # Pass canonical service name (org.kde.StatusNotifierItem-{pid}-1)
+                    # to ensure the AppIndicator extension matches the busAnalyzer ID
+                    # and avoids creating duplicate tray icons.
+                    watcher.RegisterStatusNotifierItem(bus_service_name, dbus_interface=watcher_name)
+                    self.is_registered = True
+                    logger.info("Registered Telegram Bridge tray with %s as %s", watcher_name, bus_service_name)
+                    return
+                except Exception as e:
+                    logger.debug("Could not register with %s: %s", watcher_name, e)
+            self.is_registered = False
+            logger.debug("Could not register with StatusNotifierWatcher (will retry or rely on bus scanner).")
 
         def get_activity_status(self) -> tuple[bool, str, dict]:
             """Return (is_running, description, session_details)."""
@@ -542,10 +549,15 @@ if HAS_DBUS:
                 except Exception:
                     pass
                 self._timer_id = None
+            if hasattr(self, "loop") and self.loop and self.loop.is_running():
+                try:
+                    self.loop.quit()
+                except Exception:
+                    pass
 
         def run(self):
-            loop = GLib.MainLoop()
-            loop.run()
+            self.loop = GLib.MainLoop()
+            self.loop.run()
 
 
 def open_terminal_logs():

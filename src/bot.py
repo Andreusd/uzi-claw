@@ -113,6 +113,11 @@ async def post_shutdown(app: Application) -> None:
     """Graceful shutdown hook for UziClaw bot."""
     logger.info("Executing post_shutdown cleanup...")
     try:
+        from .tray import stop_tray
+        stop_tray()
+    except Exception as e:
+        logger.debug("Error stopping tray in post_shutdown: %s", e)
+    try:
         await scheduler_service.stop()
     except Exception as e:
         logger.error("Error stopping scheduler service in post_shutdown: %s", e)
