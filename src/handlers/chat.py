@@ -4,8 +4,8 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Optional
-from telegram import Update
+from typing import Optional, Any
+from telegram import Update, Message
 from telegram.ext import ContextTypes
 
 from ..config import INJECT_TELEGRAM_CONTEXT, MEDIA_DIR, FORUM_GROUP_ID
@@ -38,6 +38,11 @@ from .forum_helper import (
 
 logger = logging.getLogger(__name__)
 
+# Media group (album) batching cache: (chat_id, thread_id, media_group_id) -> list[Message]
+_media_group_cache: dict[tuple[int, Optional[int], str], list[Message]] = {}
+_media_group_lock = asyncio.Lock()
+MEDIA_GROUP_DEBOUNCE_SECONDS: float = 0.5
+
 
 def _is_context_injection_enabled() -> bool:
     import sys
@@ -68,6 +73,145 @@ def build_prompt_with_context(prompt_text: str, user=None, is_first_turn: bool =
     return f"{context_prefix}{prompt_text}"
 
 
+async def prepare_prompt_from_messages(messages: list[Message], context: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
+    """
+    Extract prompt text and handle media downloads for one or more messages (including albums/media groups).
+    Returns (prompt_text, initial_status_description) or ("", "") if unsupported.
+    """
+    if not messages:
+        return "", ""
+
+    # Single message flow
+    if len(messages) == 1:
+        msg = messages[0]
+        # 1. Voice Message (.ogg Opus)
+        if msg.voice:
+            file_id = msg.voice.file_id
+            filename = f"voice_{msg.message_id}_{file_id[:8]}.ogg"
+            local_path = MEDIA_DIR / filename
+            await download_telegram_file_with_retry(context.bot, file_id, local_path)
+            caption = msg.caption.strip() if msg.caption else ""
+            caption_part = f"\nUser's note: {caption}" if caption else ""
+            prompt_text = (
+                f"[Attached Voice Note: {local_path} (Use view_file to inspect/listen)]\n\n"
+                f"The user sent a voice message. Please listen to or inspect this audio file and respond to the user's spoken request.{caption_part}"
+            )
+            return prompt_text, "🎙️ Processing voice message..."
+
+        # 2. Photo
+        if msg.photo:
+            photo = msg.photo[-1]  # Highest resolution
+            file_id = photo.file_id
+            filename = f"photo_{msg.message_id}_{file_id[:8]}.jpg"
+            local_path = MEDIA_DIR / filename
+            await download_telegram_file_with_retry(context.bot, file_id, local_path)
+            caption = msg.caption.strip() if msg.caption else ""
+            user_request = caption if caption else "Please inspect the attached image and assist me with it."
+            prompt_text = (
+                f"[Attached Image: {local_path} (Use view_file to inspect)]\n\n"
+                f"{user_request}"
+            )
+            return prompt_text, "🖼️ Processing image..."
+
+        # 3. Audio file (MP3, WAV, etc.)
+        if msg.audio:
+            file_id = msg.audio.file_id
+            orig_ext = Path(msg.audio.file_name).suffix if msg.audio.file_name else ".mp3"
+            filename = f"audio_{msg.message_id}_{file_id[:8]}{orig_ext}"
+            local_path = MEDIA_DIR / filename
+            await download_telegram_file_with_retry(context.bot, file_id, local_path)
+            caption = msg.caption.strip() if msg.caption else ""
+            caption_part = f"\nUser's note: {caption}" if caption else ""
+            prompt_text = (
+                f"[Attached Audio File: {local_path} (Use view_file to inspect/listen)]\n\n"
+                f"Please listen to or analyze this audio file and assist me with it.{caption_part}"
+            )
+            return prompt_text, "🎵 Processing audio file..."
+
+        # 4. Document (e.g. image or other file sent uncompressed)
+        if msg.document:
+            file_id = msg.document.file_id
+            orig_name = msg.document.file_name or "file"
+            safe_name = "".join(c for c in orig_name if c.isalnum() or c in "._- ")
+            filename = f"doc_{msg.message_id}_{safe_name}"
+            local_path = MEDIA_DIR / filename
+            await download_telegram_file_with_retry(context.bot, file_id, local_path)
+            caption = msg.caption.strip() if msg.caption else ""
+            user_request = caption if caption else f"Please inspect the attached file ({orig_name})."
+            prompt_text = (
+                f"[Attached Document: {local_path} (Use view_file to inspect)]\n\n"
+                f"{user_request}"
+            )
+            return prompt_text, f"📄 Processing document ({orig_name})..."
+
+        # 5. Plain text
+        if msg.text:
+            return msg.text.strip(), "🤖 *UziClaw:* Initializing..."
+
+        return "", ""
+
+    # Multiple messages in an album / media group:
+    captions = [m.caption.strip() for m in messages if m.caption and m.caption.strip()]
+    combined_caption = "\n".join(captions)
+
+    download_tasks = []
+    for msg in messages:
+        if msg.photo:
+            photo = msg.photo[-1]
+            filename = f"photo_{msg.message_id}_{photo.file_id[:8]}.jpg"
+            local_path = MEDIA_DIR / filename
+            download_tasks.append((photo.file_id, local_path, "image", None))
+        elif msg.document:
+            orig_name = msg.document.file_name or "file"
+            safe_name = "".join(c for c in orig_name if c.isalnum() or c in "._- ")
+            filename = f"doc_{msg.message_id}_{safe_name}"
+            local_path = MEDIA_DIR / filename
+            download_tasks.append((msg.document.file_id, local_path, "document", orig_name))
+        elif msg.audio:
+            orig_ext = Path(msg.audio.file_name).suffix if msg.audio.file_name else ".mp3"
+            filename = f"audio_{msg.message_id}_{msg.audio.file_id[:8]}{orig_ext}"
+            local_path = MEDIA_DIR / filename
+            download_tasks.append((msg.audio.file_id, local_path, "audio", None))
+
+    if not download_tasks:
+        # Fallback to plain text if any message had text
+        combined_text = "\n".join(m.text.strip() for m in messages if m.text and m.text.strip())
+        if combined_text:
+            return combined_text, "🤖 *UziClaw:* Initializing..."
+        return "", ""
+
+    async def _download_one(fid: str, path: Path) -> None:
+        await download_telegram_file_with_retry(context.bot, fid, path)
+
+    await asyncio.gather(*[_download_one(fid, path) for fid, path, _, _ in download_tasks])
+
+    attachment_lines = []
+    for _, path, kind, orig_name in download_tasks:
+        if kind == "image":
+            attachment_lines.append(f"[Attached Image: {path} (Use view_file to inspect)]")
+        elif kind == "document":
+            attachment_lines.append(f"[Attached Document: {path} (Use view_file to inspect)]")
+        elif kind == "audio":
+            attachment_lines.append(f"[Attached Audio File: {path} (Use view_file to inspect/listen)]")
+
+    img_count = sum(1 for _, _, k, _ in download_tasks if k == "image")
+    if combined_caption:
+        user_request = combined_caption
+    elif img_count == len(download_tasks):
+        user_request = f"Please inspect the attached {img_count} images and assist me with them."
+    else:
+        user_request = f"Please inspect the attached {len(download_tasks)} files and assist me with them."
+
+    prompt_text = "\n".join(attachment_lines) + f"\n\n{user_request}"
+
+    if img_count == len(download_tasks):
+        init_status = f"🖼️ Processing {img_count} images..."
+    else:
+        init_status = f"📁 Processing {len(download_tasks)} files..."
+
+    return prompt_text, init_status
+
+
 async def prepare_prompt_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
     """
     Extract prompt text and handle media downloads (photos, voice notes, audio, documents).
@@ -76,72 +220,7 @@ async def prepare_prompt_from_message(update: Update, context: ContextTypes.DEFA
     msg = update.effective_message
     if not msg:
         return "", ""
-
-    # 1. Voice Message (.ogg Opus)
-    if msg.voice:
-        file_id = msg.voice.file_id
-        filename = f"voice_{msg.message_id}_{file_id[:8]}.ogg"
-        local_path = MEDIA_DIR / filename
-        await download_telegram_file_with_retry(context.bot, file_id, local_path)
-        caption = msg.caption.strip() if msg.caption else ""
-        caption_part = f"\nUser's note: {caption}" if caption else ""
-        prompt_text = (
-            f"[Attached Voice Note: {local_path} (Use view_file to inspect/listen)]\n\n"
-            f"The user sent a voice message. Please listen to or inspect this audio file and respond to the user's spoken request.{caption_part}"
-        )
-        return prompt_text, "🎙️ Processing voice message..."
-
-    # 2. Photo
-    if msg.photo:
-        photo = msg.photo[-1]  # Highest resolution
-        file_id = photo.file_id
-        filename = f"photo_{msg.message_id}_{file_id[:8]}.jpg"
-        local_path = MEDIA_DIR / filename
-        await download_telegram_file_with_retry(context.bot, file_id, local_path)
-        caption = msg.caption.strip() if msg.caption else ""
-        user_request = caption if caption else "Please inspect the attached image and assist me with it."
-        prompt_text = (
-            f"[Attached Image: {local_path} (Use view_file to inspect)]\n\n"
-            f"{user_request}"
-        )
-        return prompt_text, "🖼️ Processing image..."
-
-    # 3. Audio file (MP3, WAV, etc.)
-    if msg.audio:
-        file_id = msg.audio.file_id
-        orig_ext = Path(msg.audio.file_name).suffix if msg.audio.file_name else ".mp3"
-        filename = f"audio_{msg.message_id}_{file_id[:8]}{orig_ext}"
-        local_path = MEDIA_DIR / filename
-        await download_telegram_file_with_retry(context.bot, file_id, local_path)
-        caption = msg.caption.strip() if msg.caption else ""
-        caption_part = f"\nUser's note: {caption}" if caption else ""
-        prompt_text = (
-            f"[Attached Audio File: {local_path} (Use view_file to inspect/listen)]\n\n"
-            f"Please listen to or analyze this audio file and assist me with it.{caption_part}"
-        )
-        return prompt_text, "🎵 Processing audio file..."
-
-    # 4. Document (e.g. image or other file sent uncompressed)
-    if msg.document:
-        file_id = msg.document.file_id
-        orig_name = msg.document.file_name or "file"
-        safe_name = "".join(c for c in orig_name if c.isalnum() or c in "._- ")
-        filename = f"doc_{msg.message_id}_{safe_name}"
-        local_path = MEDIA_DIR / filename
-        await download_telegram_file_with_retry(context.bot, file_id, local_path)
-        caption = msg.caption.strip() if msg.caption else ""
-        user_request = caption if caption else f"Please inspect the attached file ({orig_name})."
-        prompt_text = (
-            f"[Attached Document: {local_path} (Use view_file to inspect)]\n\n"
-            f"{user_request}"
-        )
-        return prompt_text, f"📄 Processing document ({orig_name})..."
-
-    # 5. Plain text
-    if msg.text:
-        return msg.text.strip(), "🤖 *UziClaw:* Initializing..."
-
-    return "", ""
+    return await prepare_prompt_from_messages([msg], context)
 
 
 @restricted
@@ -179,14 +258,22 @@ async def cmd_terminal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await safe_reply(msg, text)
 
 
-async def _handle_general_forum_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg, chat) -> None:
+async def _handle_general_forum_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    msg_or_messages: Any,
+    chat: Any,
+) -> None:
     """
-    Handle message sent in the General topic of a forum supergroup.
+    Handle message(s) sent in the General topic of a forum supergroup.
     Spawns a new dedicated forum topic, runs prompt in a fresh session, and posts ONLY in the new topic.
     Never posts anything in the General topic.
     """
+    messages = msg_or_messages if isinstance(msg_or_messages, list) else [msg_or_messages]
+    target_msg = next((m for m in reversed(messages) if m.caption), messages[-1])
+
     try:
-        prompt_text, init_status = await prepare_prompt_from_message(update, context)
+        prompt_text, init_status = await prepare_prompt_from_messages(messages, context)
     except Exception as e:
         logger.error("Failed to process media in General forum message: %s", e, exc_info=True)
         return
@@ -214,7 +301,7 @@ async def _handle_general_forum_message(update: Update, context: ContextTypes.DE
 
     # Post user prompt preview in the new topic
     try:
-        preview = format_user_prompt_preview(msg, prompt_text)
+        preview = format_user_prompt_preview(target_msg, prompt_text)
         await safe_send(context.bot, chat.id, preview, thread_id=target_thread_id)
     except Exception as e:
         logger.debug("Failed to post prompt preview to new topic: %s", e)
@@ -437,9 +524,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not msg or not chat:
         return
 
+    # Check if this message is part of an album / media group
+    media_group_id = getattr(msg, "media_group_id", None)
+    is_media_group = (
+        bool(media_group_id)
+        and isinstance(media_group_id, str)
+        and bool(msg.photo or msg.document or msg.audio)
+    )
+    if is_media_group:
+        raw_thread_id = getattr(msg, "message_thread_id", None)
+        thread_id = raw_thread_id if isinstance(raw_thread_id, int) else None
+        key = (chat.id, thread_id, str(media_group_id))
+        async with _media_group_lock:
+            if key in _media_group_cache:
+                _media_group_cache[key].append(msg)
+                logger.debug("Grouped message %s into media_group_id=%s", msg.message_id, media_group_id)
+                return
+            _media_group_cache[key] = [msg]
+
+        try:
+            await asyncio.sleep(MEDIA_GROUP_DEBOUNCE_SECONDS)
+        finally:
+            async with _media_group_lock:
+                messages = _media_group_cache.pop(key, [msg])
+    else:
+        messages = [msg]
+
+    target_msg = next((m for m in reversed(messages) if m.caption), messages[-1])
+
     # Check if sent in the General topic of a forum group
-    if is_forum_general_chat(chat, msg):
-        await _handle_general_forum_message(update, context, msg, chat)
+    if is_forum_general_chat(chat, target_msg):
+        await _handle_general_forum_message(update, context, messages, chat)
         return
 
     is_private = (chat.type == "private")
@@ -448,22 +563,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # 1. Direct terminal mode (no LLM involved)
     if session.terminal_mode:
         # Handle media gracefully
-        if msg.photo or msg.voice or msg.audio or msg.document:
+        has_media = any(m.photo or m.voice or m.audio or m.document for m in messages)
+        if has_media:
             await safe_reply(
-                msg,
+                target_msg,
                 "⚠️ Terminal mode is active. Only shell text commands are supported.\n"
                 "Send `/terminal` to exit and return to LLM mode.",
             )
             return
 
-        cmd_text = msg.text.strip() if msg.text else ""
+        cmd_text = target_msg.text.strip() if target_msg.text else ""
         if not cmd_text:
             return
 
         # Check for explicit exit command
         if cmd_text.lower() in ("exit", "quit", ":q") or cmd_text.lower().startswith("/terminal"):
             session.terminal_mode = False
-            await safe_reply(msg, "🔙 **Exited Terminal Mode.** Returned to LLM mode.")
+            await safe_reply(target_msg, "🔙 **Exited Terminal Mode.** Returned to LLM mode.")
             return
 
         acquired = False
@@ -501,10 +617,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             try:
                 # Extract prompt text and handle media downloads
                 try:
-                    prompt_text, init_status = await prepare_prompt_from_message(update, context)
+                    prompt_text, init_status = await prepare_prompt_from_messages(messages, context)
                 except Exception as e:
                     logger.error("Failed to process message media: %s", e, exc_info=True)
-                    await safe_reply(msg, f"❌ Failed to process attached file: {e}")
+                    await safe_reply(target_msg, f"❌ Failed to process attached file: {e}")
                     return
 
                 if not prompt_text:
@@ -512,21 +628,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 if session.cancel_requested:
                     session.cancel_requested = False
-                    await safe_reply(msg, "⏹️ Execution cancelled before starting.")
+                    await safe_reply(target_msg, "⏹️ Execution cancelled before starting.")
                     return
 
                 # Post initial status message with retry
-                status_msg = await safe_reply(msg, init_status)
+                status_msg = await safe_reply(target_msg, init_status)
                 if not status_msg:
                     await asyncio.sleep(1)
-                    status_msg = await safe_reply(msg, init_status)
+                    status_msg = await safe_reply(target_msg, init_status)
 
                 if session.cancel_requested:
                     session.cancel_requested = False
                     if status_msg:
                         await safe_edit(status_msg, "⏹️ Execution cancelled before starting.")
                     else:
-                        await safe_reply(msg, "⏹️ Execution cancelled before starting.")
+                        await safe_reply(target_msg, "⏹️ Execution cancelled before starting.")
                     return
 
                 updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
@@ -570,7 +686,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     if updater:
                         await updater.update(cancel_text, force=True)
                     else:
-                        await safe_reply(msg, cancel_text)
+                        await safe_reply(target_msg, cancel_text)
                     return
 
                 if status == "ERROR":
@@ -578,7 +694,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     if updater:
                         await updater.update(err_display, force=True)
                     else:
-                        await safe_reply(msg, err_display)
+                        await safe_reply(target_msg, err_display)
                     return
 
                 if not response_text:
@@ -586,7 +702,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     if updater:
                         await updater.update(empty_msg, force=True)
                     else:
-                        await safe_reply(msg, empty_msg)
+                        await safe_reply(target_msg, empty_msg)
                     return
 
                 # Response is available: chunk it and send
@@ -597,11 +713,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if updater:
                     edited = await updater.update(chunks[0], force=True)
                 if not edited:
-                    await safe_reply(msg, chunks[0])
+                    await safe_reply(target_msg, chunks[0])
 
                 # Send any remaining chunks as separate messages
                 for chunk in chunks[1:]:
-                    await safe_reply(msg, chunk)
+                    await safe_reply(target_msg, chunk)
             finally:
                 if session.runner is current_runner:
                     session.is_busy = False

@@ -34,6 +34,7 @@ from .schedules import (
 from .chat import (
     build_prompt_with_context,
     prepare_prompt_from_message,
+    prepare_prompt_from_messages,
     cmd_terminal,
     execute_terminal_command,
     handle_message,
@@ -79,6 +80,7 @@ __all__ = [
     "handle_schedule_callback",
     "build_prompt_with_context",
     "prepare_prompt_from_message",
+    "prepare_prompt_from_messages",
     "cmd_terminal",
     "execute_terminal_command",
     "handle_message",

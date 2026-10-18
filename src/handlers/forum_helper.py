@@ -246,7 +246,9 @@ def generate_topic_name(prompt_text: str, default_prefix: str = "Conversa") -> s
         if lines:
             title = f"{emoji_char} {lines[0]}"
         else:
-            title = f"🖼️ Imagem {now_str}"
+            img_count = cleaned.count("[Attached Image:")
+            img_desc = f"{img_count} Imagens" if img_count > 1 else "Imagem"
+            title = f"🖼️ {img_desc} {now_str}"
         return title[:128]
 
     if cleaned.startswith("[Attached Audio File:"):
@@ -426,9 +428,11 @@ def format_user_prompt_preview(msg: Optional[Message], prompt_text: str, origin:
         return f"{user_label} 🎙️ _(Mensagem de voz){note}_"
 
     if cleaned.startswith("[Attached Image:"):
+        img_count = cleaned.count("[Attached Image:")
+        img_label = f"({img_count} Imagens)" if img_count > 1 else "(Imagem)"
         lines = [line.strip() for line in cleaned.splitlines() if line.strip() and not line.startswith("[Attached Image:")]
         extra = f"\n_{lines[0]}_" if lines else ""
-        return f"{user_label} 🖼️ _(Imagem){extra}_"
+        return f"{user_label} 🖼️ _{img_label}{extra}_"
 
     if cleaned.startswith("[Attached Document:"):
         return f"{user_label} 📄 _(Documento anexado)_"
