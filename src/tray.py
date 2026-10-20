@@ -7,7 +7,7 @@ import logging
 import threading
 import subprocess
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Any
 
 logger = logging.getLogger(__name__)
 
@@ -136,172 +136,86 @@ if HAS_DBUS:
             self.revision = 1
             self.callbacks: dict[int, Callable[[], None]] = {}
 
+        def _add_menu_item(self, items: list, item_id: int, label: str, enabled: bool = True, callback: Optional[Callable[[], None]] = None) -> int:
+            empty_children = dbus.Array([], signature="v")
+            if callback:
+                self.callbacks[item_id] = callback
+            
+            items.append((
+                dbus.Int32(item_id),
+                dbus.Dictionary({
+                    "label": dbus.String(label, variant_level=1),
+                    "enabled": dbus.Boolean(enabled, variant_level=1),
+                }, signature="sv"),
+                empty_children
+            ))
+            return item_id + 1
+
+        def _add_separator(self, items: list, item_id: int) -> int:
+            empty_children = dbus.Array([], signature="v")
+            items.append((
+                dbus.Int32(item_id),
+                dbus.Dictionary({"type": dbus.String("separator", variant_level=1)}, signature="sv"),
+                empty_children
+            ))
+            return item_id + 1
+
+        def _build_header(self, items: list, item_id: int) -> int:
+            return self._add_menu_item(items, item_id, "🐾 UziClaw Telegram Bridge", enabled=False)
+
+        def _build_status_details(self, items: list, item_id: int, is_running: bool, run_desc: str, session_info: dict) -> int:
+            status_bullet = "⚡" if is_running else "🟢"
+            status_text = f"{status_bullet} Status: {run_desc}"
+            item_id = self._add_menu_item(items, item_id, f"    {status_text}", enabled=False)
+
+            if session_info:
+                if session_info.get("cid"):
+                    cid_preview = session_info["cid"][:8] + "..." if len(session_info["cid"]) > 10 else session_info["cid"]
+                    item_id = self._add_menu_item(items, item_id, f"    💬 Chat: {cid_preview}", enabled=False)
+
+                if session_info.get("cwd"):
+                    cwd_name = Path(session_info["cwd"]).name or session_info["cwd"]
+                    item_id = self._add_menu_item(items, item_id, f"    📁 Dir: {cwd_name}", enabled=False)
+
+                if "autopilot" in session_info:
+                    ap_text = "Enabled (auto-run)" if session_info["autopilot"] else "Disabled (ask)"
+                    item_id = self._add_menu_item(items, item_id, f"    🤖 Autopilot: {ap_text}", enabled=False)
+
+            return item_id
+
+        def _build_actions(self, items: list, item_id: int, is_running: bool) -> int:
+            if is_running:
+                item_id = self._add_menu_item(items, item_id, "🛑 Interrupt Running Task", callback=self.app.interrupt_current_task)
+
+            item_id = self._add_menu_item(items, item_id, "🆕 Start Fresh Conversation", callback=self.app.reset_current_session)
+            item_id = self._add_separator(items, item_id)
+            item_id = self._add_menu_item(items, item_id, "📋 View Live Logs (Terminal)", callback=open_terminal_logs)
+            item_id = self._add_menu_item(items, item_id, "⚙️ Edit Configuration (.env)", callback=open_config_file)
+            item_id = self._add_menu_item(items, item_id, "🔄 Restart Bridge Service", callback=self.app.restart_service)
+            item_id = self._add_menu_item(items, item_id, "⏹️ Stop Bridge Service", callback=self.app.stop_service)
+            
+            return item_id
+
         @dbus.service.method("com.canonical.dbusmenu", in_signature="iias", out_signature="u(ia{sv}av)")
         def GetLayout(self, parent_id: int, recursion_depth: int, property_names: list):
             items = []
             self.callbacks.clear()
             item_id = 1
 
-            empty_children = dbus.Array([], signature="v")
             empty_props = dbus.Dictionary({}, signature="sv")
 
             # 1. Header (Title)
-            items.append((
-                dbus.Int32(item_id),
-                dbus.Dictionary({
-                    "label": dbus.String("🐾 UziClaw Telegram Bridge", variant_level=1),
-                    "enabled": dbus.Boolean(False, variant_level=1),
-                }, signature="sv"),
-                empty_children
-            ))
-            item_id += 1
+            item_id = self._build_header(items, item_id)
 
             # 2. Status details
             is_running, run_desc, session_info = self.app.get_activity_status()
-            status_bullet = "⚡" if is_running else "🟢"
-            status_text = f"{status_bullet} Status: {run_desc}"
-
-            items.append((
-                dbus.Int32(item_id),
-                dbus.Dictionary({
-                    "label": dbus.String(f"    {status_text}", variant_level=1),
-                    "enabled": dbus.Boolean(False, variant_level=1),
-                }, signature="sv"),
-                empty_children
-            ))
-            item_id += 1
-
-            if session_info:
-                if session_info.get("cid"):
-                    cid_preview = session_info["cid"][:8] + "..." if len(session_info["cid"]) > 10 else session_info["cid"]
-                    items.append((
-                        dbus.Int32(item_id),
-                        dbus.Dictionary({
-                            "label": dbus.String(f"    💬 Chat: {cid_preview}", variant_level=1),
-                            "enabled": dbus.Boolean(False, variant_level=1),
-                        }, signature="sv"),
-                        empty_children
-                    ))
-                    item_id += 1
-
-                if session_info.get("cwd"):
-                    cwd_name = Path(session_info["cwd"]).name or session_info["cwd"]
-                    items.append((
-                        dbus.Int32(item_id),
-                        dbus.Dictionary({
-                            "label": dbus.String(f"    📁 Dir: {cwd_name}", variant_level=1),
-                            "enabled": dbus.Boolean(False, variant_level=1),
-                        }, signature="sv"),
-                        empty_children
-                    ))
-                    item_id += 1
-
-                if "autopilot" in session_info:
-                    ap_text = "Enabled (auto-run)" if session_info["autopilot"] else "Disabled (ask)"
-                    items.append((
-                        dbus.Int32(item_id),
-                        dbus.Dictionary({
-                            "label": dbus.String(f"    🤖 Autopilot: {ap_text}", variant_level=1),
-                            "enabled": dbus.Boolean(False, variant_level=1),
-                        }, signature="sv"),
-                        empty_children
-                    ))
-                    item_id += 1
+            item_id = self._build_status_details(items, item_id, is_running, run_desc, session_info)
 
             # Separator
-            items.append((
-                dbus.Int32(item_id),
-                dbus.Dictionary({"type": dbus.String("separator", variant_level=1)}, signature="sv"),
-                empty_children
-            ))
-            item_id += 1
+            item_id = self._add_separator(items, item_id)
 
-            # 3. Actions: Interrupt (active task)
-            if is_running:
-                int_id = item_id
-                self.callbacks[int_id] = self.app.interrupt_current_task
-                items.append((
-                    dbus.Int32(item_id),
-                    dbus.Dictionary({
-                        "label": dbus.String("🛑 Interrupt Running Task", variant_level=1),
-                        "enabled": dbus.Boolean(True, variant_level=1),
-                    }, signature="sv"),
-                    empty_children
-                ))
-                item_id += 1
-
-            # New session action
-            new_id = item_id
-            self.callbacks[new_id] = self.app.reset_current_session
-            items.append((
-                dbus.Int32(item_id),
-                dbus.Dictionary({
-                    "label": dbus.String("🆕 Start Fresh Conversation", variant_level=1),
-                    "enabled": dbus.Boolean(True, variant_level=1),
-                }, signature="sv"),
-                empty_children
-            ))
-            item_id += 1
-
-            # Separator
-            items.append((
-                dbus.Int32(item_id),
-                dbus.Dictionary({"type": dbus.String("separator", variant_level=1)}, signature="sv"),
-                empty_children
-            ))
-            item_id += 1
-
-            # Logs action
-            logs_id = item_id
-            self.callbacks[logs_id] = open_terminal_logs
-            items.append((
-                dbus.Int32(item_id),
-                dbus.Dictionary({
-                    "label": dbus.String("📋 View Live Logs (Terminal)", variant_level=1),
-                    "enabled": dbus.Boolean(True, variant_level=1),
-                }, signature="sv"),
-                empty_children
-            ))
-            item_id += 1
-
-            # Edit .env config action
-            cfg_id = item_id
-            self.callbacks[cfg_id] = open_config_file
-            items.append((
-                dbus.Int32(item_id),
-                dbus.Dictionary({
-                    "label": dbus.String("⚙️ Edit Configuration (.env)", variant_level=1),
-                    "enabled": dbus.Boolean(True, variant_level=1),
-                }, signature="sv"),
-                empty_children
-            ))
-            item_id += 1
-
-            # Restart service action
-            restart_id = item_id
-            self.callbacks[restart_id] = self.app.restart_service
-            items.append((
-                dbus.Int32(item_id),
-                dbus.Dictionary({
-                    "label": dbus.String("🔄 Restart Bridge Service", variant_level=1),
-                    "enabled": dbus.Boolean(True, variant_level=1),
-                }, signature="sv"),
-                empty_children
-            ))
-            item_id += 1
-
-            # Stop service action
-            stop_id = item_id
-            self.callbacks[stop_id] = self.app.stop_service
-            items.append((
-                dbus.Int32(item_id),
-                dbus.Dictionary({
-                    "label": dbus.String("⏹️ Stop Bridge Service", variant_level=1),
-                    "enabled": dbus.Boolean(True, variant_level=1),
-                }, signature="sv"),
-                empty_children
-            ))
-            item_id += 1
+            # 3. Actions
+            item_id = self._build_actions(items, item_id, is_running)
 
             root = (dbus.Int32(0), empty_props, dbus.Array(items, signature="(ia{sv}av)"))
             return (dbus.UInt32(self.revision), root)
