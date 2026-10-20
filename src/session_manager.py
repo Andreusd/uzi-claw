@@ -401,112 +401,129 @@ class SessionManager:
 
         return valid_turns[-max_turns:]
 
+    @staticmethod
+    def _truncate_preview(text: str, max_len: int = 60) -> str:
+        """Flatten and truncate text for preview display."""
+        preview = text.replace("\n", " ").strip()
+        if len(preview) > max_len:
+            return preview[:max_len - 3] + "..."
+        return preview
+
+    def _extract_transcript_prompts(self, tpath: Path) -> tuple[Optional[str], Optional[str], int]:
+        """Extract first and latest user prompt and latest timestamp from transcript.jsonl."""
+        first_prompt = None
+        latest_prompt = None
+        latest_ts = int(tpath.stat().st_mtime * 1000)
+
+        try:
+            with tpath.open("r", encoding="utf-8") as tf:
+                for line in tf:
+                    if '"USER_INPUT"' not in line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if entry.get("type") == "USER_INPUT":
+                            content = entry.get("content", "")
+                            prompt = self._clean_prompt_display(content)
+                            if prompt and prompt != "Reply with the single word: PONG":
+                                if not first_prompt:
+                                    first_prompt = prompt
+                                latest_prompt = prompt
+                                ca = entry.get("created_at")
+                                if ca:
+                                    try:
+                                        dt = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+                                        latest_ts = max(latest_ts, int(dt.timestamp() * 1000))
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        return first_prompt, latest_prompt, latest_ts
+
+    def _scan_brain_transcripts(self) -> dict[str, dict]:
+        """Scan AGY_BRAIN_DIR for actual conversation transcripts (CLI, Telegram, IDE)."""
+        conv_map: dict[str, dict] = {}
+        if not (AGY_BRAIN_DIR.exists() and AGY_BRAIN_DIR.is_dir()):
+            return conv_map
+
+        try:
+            dirs = [d for d in AGY_BRAIN_DIR.iterdir() if d.is_dir()]
+            dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+
+            for cdir in dirs[:40]:
+                cid = cdir.name
+                tpath = cdir / ".system_generated" / "logs" / "transcript.jsonl"
+                if not tpath.exists():
+                    continue
+
+                first_prompt, latest_prompt, latest_ts = self._extract_transcript_prompts(tpath)
+                chosen_prompt = first_prompt or latest_prompt
+                if chosen_prompt:
+                    preview = self._truncate_preview(chosen_prompt)
+                    conv_map[cid] = {
+                        "id": cid,
+                        "timestamp": latest_ts,
+                        "preview": preview or "<empty prompt>",
+                        "workspace": "",
+                    }
+        except Exception as e:
+            logger.error("Failed to scan brain directory: %s", e)
+
+        return conv_map
+
+    def _parse_history_file(self, conv_map: dict[str, dict]) -> None:
+        """Parse history.jsonl for CLI REPL prompt history and merge into conv_map."""
+        if not AGY_HISTORY_FILE.exists():
+            return
+
+        try:
+            with AGY_HISTORY_FILE.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        cid = entry.get("conversationId")
+                        if not cid:
+                            continue
+
+                        ts = entry.get("timestamp", 0)
+                        display = entry.get("display", "").strip()
+                        ws = entry.get("workspace", "")
+
+                        if cid in conv_map and display.startswith("/") and len(conv_map[cid]["preview"]) > len(display):
+                            conv_map[cid]["timestamp"] = max(conv_map[cid]["timestamp"], ts)
+                        else:
+                            preview = self._truncate_preview(display)
+                            if cid in conv_map:
+                                conv_map[cid]["timestamp"] = max(conv_map[cid]["timestamp"], ts)
+                                if ws:
+                                    conv_map[cid]["workspace"] = ws
+                                if not conv_map[cid]["preview"] or conv_map[cid]["preview"] == "<empty prompt>":
+                                    conv_map[cid]["preview"] = preview
+                            else:
+                                conv_map[cid] = {
+                                    "id": cid,
+                                    "timestamp": ts,
+                                    "preview": preview or "<empty prompt>",
+                                    "workspace": ws,
+                                }
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.error("Failed to read agy history file: %s", e)
+
     def list_recent_conversations(self, limit: int = 8) -> list[dict]:
         """
         Parse brain transcripts and history.jsonl and return unique recent conversations
         ordered newest to oldest.
         """
-        conv_map: dict[str, dict] = {}
-
-        # 1. Scan AGY_BRAIN_DIR for actual conversation transcripts (CLI, Telegram, IDE)
-        if AGY_BRAIN_DIR.exists() and AGY_BRAIN_DIR.is_dir():
-            try:
-                dirs = [d for d in AGY_BRAIN_DIR.iterdir() if d.is_dir()]
-                dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
-
-                for cdir in dirs[:40]:
-                    cid = cdir.name
-                    tpath = cdir / ".system_generated" / "logs" / "transcript.jsonl"
-                    if not tpath.exists():
-                        continue
-
-                    first_prompt = None
-                    latest_prompt = None
-                    latest_ts = int(tpath.stat().st_mtime * 1000)
-
-                    try:
-                        with tpath.open("r", encoding="utf-8") as tf:
-                            for line in tf:
-                                if '"USER_INPUT"' not in line:
-                                    continue
-                                try:
-                                    entry = json.loads(line)
-                                    if entry.get("type") == "USER_INPUT":
-                                        content = entry.get("content", "")
-                                        prompt = self._clean_prompt_display(content)
-                                        # Skip automated test or empty prompts
-                                        if prompt and prompt != "Reply with the single word: PONG":
-                                            if not first_prompt:
-                                                first_prompt = prompt
-                                            latest_prompt = prompt
-                                            ca = entry.get("created_at")
-                                            if ca:
-                                                try:
-                                                    dt = datetime.fromisoformat(ca.replace("Z", "+00:00"))
-                                                    latest_ts = max(latest_ts, int(dt.timestamp() * 1000))
-                                                except Exception:
-                                                    pass
-                                except Exception:
-                                    continue
-                    except Exception:
-                        continue
-
-                    chosen_prompt = first_prompt or latest_prompt
-                    if chosen_prompt:
-                        preview = chosen_prompt.replace("\n", " ").strip()
-                        if len(preview) > 60:
-                            preview = preview[:57] + "..."
-                        conv_map[cid] = {
-                            "id": cid,
-                            "timestamp": latest_ts,
-                            "preview": preview or "<empty prompt>",
-                            "workspace": "",
-                        }
-            except Exception as e:
-                logger.error("Failed to scan brain directory: %s", e)
-
-        # 2. Also parse history.jsonl for CLI REPL prompt history
-        if AGY_HISTORY_FILE.exists():
-            try:
-                with AGY_HISTORY_FILE.open("r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            entry = json.loads(line)
-                            cid = entry.get("conversationId")
-                            if not cid:
-                                continue
-
-                            ts = entry.get("timestamp", 0)
-                            display = entry.get("display", "").strip()
-                            ws = entry.get("workspace", "")
-
-                            # Skip internal or empty commands if a previous readable message exists
-                            if cid in conv_map and display.startswith("/") and len(conv_map[cid]["preview"]) > len(display):
-                                conv_map[cid]["timestamp"] = max(conv_map[cid]["timestamp"], ts)
-                            else:
-                                preview = display.replace("\n", " ").strip()
-                                if len(preview) > 60:
-                                    preview = preview[:57] + "..."
-                                if cid in conv_map:
-                                    conv_map[cid]["timestamp"] = max(conv_map[cid]["timestamp"], ts)
-                                    if ws:
-                                        conv_map[cid]["workspace"] = ws
-                                    if not conv_map[cid]["preview"] or conv_map[cid]["preview"] == "<empty prompt>":
-                                        conv_map[cid]["preview"] = preview
-                                else:
-                                    conv_map[cid] = {
-                                        "id": cid,
-                                        "timestamp": ts,
-                                        "preview": preview or "<empty prompt>",
-                                        "workspace": ws,
-                                    }
-                        except Exception:
-                            continue
-            except Exception as e:
-                logger.error("Failed to read agy history file: %s", e)
+        conv_map = self._scan_brain_transcripts()
+        self._parse_history_file(conv_map)
 
         if not conv_map:
             return []
