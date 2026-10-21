@@ -663,6 +663,59 @@ x < 10 && y > 20
 
         asyncio.run(run_test())
 
+    def test_handle_interrupt_callback(self):
+        from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+        from src.bot import handle_interrupt_callback
+        from src.antigravity_runner import AntigravityRunner
+        from src.terminal_runner import TerminalRunner
+        from src.formatters import get_interrupt_markup
+
+        async def run_test():
+            chat_id = 99887766
+            user = DummyUser(chat_id)
+            chat = MagicMock(type="private", id=chat_id)
+            status_msg = MagicMock()
+            status_msg.edit_reply_markup = AsyncMock()
+            status_msg.edit_text = AsyncMock()
+            query = MagicMock()
+            query.data = "interrupt_task"
+            query.from_user = user
+            query.message = status_msg
+            query.answer = AsyncMock()
+            update = MagicMock(callback_query=query, effective_message=status_msg, effective_user=user, effective_chat=chat)
+            ctx = MagicMock()
+
+            session = session_manager.get_session(chat_id)
+
+            with patch("src.auth.is_user_authorized", return_value=True):
+                # 1. Active agy runner
+                with patch.object(AntigravityRunner, "is_running", new_callable=PropertyMock, return_value=True), \
+                     patch.object(session.runner, "interrupt", AsyncMock(return_value=True)), \
+                     patch.object(TerminalRunner, "is_running", new_callable=PropertyMock, return_value=False):
+                    await handle_interrupt_callback(update, ctx)
+                    session.runner.interrupt.assert_called_once()
+                    query.answer.assert_called_with("⏹️ Interrompendo tarefa...")
+                    status_msg.edit_reply_markup.assert_called_with(reply_markup=None)
+
+                # 2. Idle session
+                query.answer.reset_mock()
+                status_msg.edit_reply_markup.reset_mock()
+                with patch.object(AntigravityRunner, "is_running", new_callable=PropertyMock, return_value=False), \
+                     patch.object(TerminalRunner, "is_running", new_callable=PropertyMock, return_value=False):
+                    await handle_interrupt_callback(update, ctx)
+                    query.answer.assert_called_with("⚪ Nenhuma tarefa em execução.")
+                    status_msg.edit_reply_markup.assert_called_with(reply_markup=None)
+
+            # Test get_interrupt_markup
+            markup = get_interrupt_markup()
+            self.assertEqual(len(markup.inline_keyboard), 1)
+            self.assertEqual(len(markup.inline_keyboard[0]), 1)
+            btn = markup.inline_keyboard[0][0]
+            self.assertIn("Interromper", btn.text)
+            self.assertEqual(btn.callback_data, "interrupt_task")
+
+        asyncio.run(run_test())
+
     def test_create_application_concurrent_updates(self):
         from unittest.mock import patch
         from src.bot import create_application

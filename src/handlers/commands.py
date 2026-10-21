@@ -362,6 +362,39 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await safe_reply(msg, "⚪ No task is currently running.")
 
 
+async def interrupt_session(
+    session: SessionState,
+    chat_id: Optional[int] = None,
+    thread_id: Optional[int] = None,
+) -> tuple[bool, str]:
+    """Interrupt active runner, terminal, background runner, or scheduled tasks for this session."""
+    if session.terminal_runner.is_running:
+        success = await session.terminal_runner.interrupt()
+        if success:
+            return True, "⏹️ Sent interrupt (Ctrl+C / SIGINT) to running terminal command."
+
+    if session.runner.is_running:
+        success = await session.runner.interrupt()
+        if success:
+            return True, "⏹️ Interrupted active prompt (Esc / SIGINT sent to `agy`)."
+
+    for bg_runner in list(session.background_runners):
+        if bg_runner.is_running:
+            await bg_runner.interrupt()
+            return True, "⏹️ Interrupted active prompt (Esc / SIGINT sent to `agy`)."
+
+    if chat_id:
+        cancelled_scheds = await scheduler_service.cancel_active_jobs_for_chat(chat_id, thread_id)
+        if cancelled_scheds:
+            return True, f"⏹️ Interrupted active scheduled task(s) (#{', #'.join(map(str, cancelled_scheds))})."
+
+    if session.is_busy:
+        session.cancel_requested = True
+        return True, "⏹️ Interrupted pending prompt before startup."
+
+    return False, "⚪ No task or prompt is currently running."
+
+
 @restricted
 async def cmd_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Interrupt currently executing prompt (equivalent to pressing Esc in agy CLI / sending SIGINT)."""
@@ -372,37 +405,39 @@ async def cmd_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     session = get_session_from_update(update)
     chat_id = update.effective_chat.id if update.effective_chat else None
     raw_thread_id = getattr(msg, "message_thread_id", None) if msg else None
+    thread_id = raw_thread_id if isinstance(raw_thread_id, int) else None
 
-    if session.terminal_runner.is_running:
-        success = await session.terminal_runner.interrupt()
-        if success:
-            await safe_reply(msg, "⏹️ Sent interrupt (Ctrl+C / SIGINT) to running terminal command.")
-            return
+    _, reply_text = await interrupt_session(session, chat_id, thread_id)
+    await safe_reply(msg, reply_text)
 
-    if session.runner.is_running:
-        success = await session.runner.interrupt()
-        if success:
-            await safe_reply(msg, "⏹️ Interrupted active prompt (Esc / SIGINT sent to `agy`).")
-            return
 
-    for bg_runner in list(session.background_runners):
-        if bg_runner.is_running:
-            await bg_runner.interrupt()
-            await safe_reply(msg, "⏹️ Interrupted active prompt (Esc / SIGINT sent to `agy`).")
-            return
-
-    if chat_id:
-        cancelled_scheds = await scheduler_service.cancel_active_jobs_for_chat(chat_id, raw_thread_id)
-        if cancelled_scheds:
-            await safe_reply(msg, f"⏹️ Interrupted active scheduled task(s) (#{', #'.join(map(str, cancelled_scheds))}).")
-            return
-
-    if session.is_busy:
-        session.cancel_requested = True
-        await safe_reply(msg, "⏹️ Interrupted pending prompt before startup.")
+@restricted
+async def handle_interrupt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle click on the inline 'Interrupt' button."""
+    query = update.callback_query
+    if not query:
         return
 
-    await safe_reply(msg, "⚪ No task or prompt is currently running.")
+    session = get_session_from_update(update)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    msg = query.message
+    raw_thread_id = getattr(msg, "message_thread_id", None) if msg else None
+    thread_id = raw_thread_id if isinstance(raw_thread_id, int) else None
+
+    # Remove the button immediately to give instant visual feedback and avoid multi-clicks
+    if msg:
+        try:
+            await msg.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+    success, _ = await interrupt_session(session, chat_id, thread_id)
+    if success:
+        await query.answer("⏹️ Interrompendo tarefa...")
+        if msg:
+            await safe_edit(msg, "⏹️ <i>Interrompendo tarefa pelo usuário...</i>", parse_mode="HTML", reply_markup=None)
+    else:
+        await query.answer("⚪ Nenhuma tarefa em execução.")
 
 
 @restricted

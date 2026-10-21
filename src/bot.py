@@ -46,6 +46,7 @@ from .handlers import (
     cmd_new,
     cmd_cancel,
     cmd_interrupt,
+    handle_interrupt_callback,
     cmd_device,
     cmd_stats,
     cmd_cd,
@@ -176,6 +177,7 @@ def create_application() -> Application:
     app.add_handler(SuffixCommandHandler("cancelar_agendamento", cmd_cancel_schedule))
     app.add_handler(SuffixCommandHandler("run_schedule", cmd_run_schedule))
     app.add_handler(CallbackQueryHandler(handle_schedule_callback, pattern=r"^sched_"))
+    app.add_handler(CallbackQueryHandler(handle_interrupt_callback, pattern=r"^(task_interrupt|interrupt_task|interrupt)$"))
     app.add_handler(CommandHandler("device", cmd_device))
     app.add_handler(CommandHandler("stats", cmd_device))
     app.add_handler(CommandHandler("battery", cmd_device))
@@ -231,6 +233,7 @@ __all__ = [
     "cmd_new",
     "cmd_cancel",
     "cmd_interrupt",
+    "handle_interrupt_callback",
     "cmd_device",
     "cmd_stats",
     "cmd_cd",

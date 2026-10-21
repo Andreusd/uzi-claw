@@ -19,6 +19,7 @@ from ..formatters import (
     format_terminal_output,
     RateLimitedMessageUpdater,
     LiveStatusTracker,
+    get_interrupt_markup,
 )
 from ..tray import notify_tray_state_changed
 from ..media_manager import download_telegram_file_with_retry
@@ -307,7 +308,8 @@ async def _handle_general_forum_message(
         logger.debug("Failed to post prompt preview to new topic: %s", e)
 
     # Post initial status message in the new topic
-    status_msg = await safe_send(context.bot, chat.id, init_status, thread_id=target_thread_id)
+    interrupt_markup = get_interrupt_markup()
+    status_msg = await safe_send(context.bot, chat.id, init_status, thread_id=target_thread_id, reply_markup=interrupt_markup)
 
     # Automatically unpin any messages pinned by default in the new topic
     await unpin_topic_messages_quietly(context.bot, chat.id, target_thread_id)
@@ -327,7 +329,7 @@ async def _handle_general_forum_message(
             session.cancel_requested = False
             current_runner = session.runner
             try:
-                updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
+                updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5, reply_markup=interrupt_markup) if status_msg else None
                 tracker = LiveStatusTracker(updater) if updater else None
 
                 async def on_event(event_type: str, data: Any) -> None:
@@ -363,7 +365,7 @@ async def _handle_general_forum_message(
                 if status == "CANCELLED":
                     cancel_text = response_text or "⏹️ Execução cancelada ou interrompida."
                     if updater:
-                        await updater.update(cancel_text, force=True)
+                        await updater.update(cancel_text, force=True, reply_markup=None)
                     else:
                         await safe_send(context.bot, chat.id, cancel_text, thread_id=target_thread_id)
                     return
@@ -371,14 +373,14 @@ async def _handle_general_forum_message(
                 if status == "ERROR":
                     err_display = f"❌ **Error executing turn:**\n```\n{error_msg}\n```"
                     if updater:
-                        await updater.update(err_display, force=True)
+                        await updater.update(err_display, force=True, reply_markup=None)
                     else:
                         await safe_send(context.bot, chat.id, err_display, thread_id=target_thread_id)
                     return
 
                 if not response_text:
                     if updater:
-                        await updater.update("⚠️ Turn completed with empty output.", force=True)
+                        await updater.update("⚠️ Turn completed with empty output.", force=True, reply_markup=None)
                     else:
                         await safe_send(context.bot, chat.id, "⚠️ Turn completed with empty output.", thread_id=target_thread_id)
                     return
@@ -386,7 +388,7 @@ async def _handle_general_forum_message(
                 chunks = split_message(response_text)
                 edited = False
                 if updater:
-                    edited = await updater.update(chunks[0], force=True)
+                    edited = await updater.update(chunks[0], force=True, reply_markup=None)
                 if not edited:
                     await safe_send(context.bot, chat.id, chunks[0], thread_id=target_thread_id)
 
@@ -451,8 +453,9 @@ async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT
         current_terminal_runner = session.terminal_runner
         session.is_busy = True
         session.cancel_requested = False
+        interrupt_markup = get_interrupt_markup()
         try:
-            status_msg = await safe_send(context.bot, chat.id, f"💻 `$ {cmd_preview}`\n⏳ _Running..._", thread_id=target_thread_id)
+            status_msg = await safe_send(context.bot, chat.id, f"💻 `$ {cmd_preview}`\n⏳ _Running..._", thread_id=target_thread_id, reply_markup=interrupt_markup)
             await unpin_topic_messages_quietly(context.bot, chat.id, target_thread_id)
             result = await session.terminal_runner.run(command=command, cwd=session.cwd)
             if result.get("new_cwd"):
@@ -461,7 +464,7 @@ async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT
 
             chunks = format_terminal_output(command, result) or ["✅ _(No output)_"]
             if status_msg:
-                edited = await safe_edit(status_msg, chunks[0])
+                edited = await safe_edit(status_msg, chunks[0], reply_markup=None)
                 if not edited:
                     await safe_send(context.bot, chat.id, chunks[0], thread_id=target_thread_id)
             else:
@@ -480,14 +483,15 @@ async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT
     session.is_busy = True
     session.cancel_requested = False
     notify_tray_state_changed()
+    interrupt_markup = get_interrupt_markup()
     try:
         cmd_preview = command if len(command) <= 50 else command[:47] + "..."
-        status_msg = await safe_reply(msg, f"💻 `$ {cmd_preview}`\n⏳ _Running..._")
+        status_msg = await safe_reply(msg, f"💻 `$ {cmd_preview}`\n⏳ _Running..._", reply_markup=interrupt_markup)
 
         if session.cancel_requested:
             session.cancel_requested = False
             if status_msg:
-                await safe_edit(status_msg, "⏹️ Execution cancelled before starting.")
+                await safe_edit(status_msg, "⏹️ Execution cancelled before starting.", reply_markup=None)
             else:
                 await safe_reply(msg, "⏹️ Execution cancelled before starting.")
             return
@@ -502,7 +506,7 @@ async def execute_terminal_command(update: Update, context: ContextTypes.DEFAULT
             chunks = ["✅ _(No output)_"]
 
         if status_msg:
-            edited = await safe_edit(status_msg, chunks[0])
+            edited = await safe_edit(status_msg, chunks[0], reply_markup=None)
             if not edited:
                 await safe_reply(msg, chunks[0])
         else:
@@ -632,20 +636,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     return
 
                 # Post initial status message with retry
-                status_msg = await safe_reply(target_msg, init_status)
+                interrupt_markup = get_interrupt_markup()
+                status_msg = await safe_reply(target_msg, init_status, reply_markup=interrupt_markup)
                 if not status_msg:
                     await asyncio.sleep(1)
-                    status_msg = await safe_reply(target_msg, init_status)
+                    status_msg = await safe_reply(target_msg, init_status, reply_markup=interrupt_markup)
 
                 if session.cancel_requested:
                     session.cancel_requested = False
                     if status_msg:
-                        await safe_edit(status_msg, "⏹️ Execution cancelled before starting.")
+                        await safe_edit(status_msg, "⏹️ Execution cancelled before starting.", reply_markup=None)
                     else:
                         await safe_reply(target_msg, "⏹️ Execution cancelled before starting.")
                     return
 
-                updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5) if status_msg else None
+                updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5, reply_markup=interrupt_markup) if status_msg else None
                 tracker = LiveStatusTracker(updater) if updater else None
 
                 async def on_event(event_type: str, data: Any) -> None:
@@ -684,7 +689,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if status == "CANCELLED":
                     cancel_text = response_text or "⏹️ Execução cancelada ou interrompida."
                     if updater:
-                        await updater.update(cancel_text, force=True)
+                        await updater.update(cancel_text, force=True, reply_markup=None)
                     else:
                         await safe_reply(target_msg, cancel_text)
                     return
@@ -692,7 +697,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if status == "ERROR":
                     err_display = f"❌ **Error executing turn:**\n```\n{error_msg}\n```"
                     if updater:
-                        await updater.update(err_display, force=True)
+                        await updater.update(err_display, force=True, reply_markup=None)
                     else:
                         await safe_reply(target_msg, err_display)
                     return
@@ -700,7 +705,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if not response_text:
                     empty_msg = "⚠️ Turn completed with empty output."
                     if updater:
-                        await updater.update(empty_msg, force=True)
+                        await updater.update(empty_msg, force=True, reply_markup=None)
                     else:
                         await safe_reply(target_msg, empty_msg)
                     return
@@ -711,7 +716,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 # Edit initial message with the first chunk, or send as reply if no status_msg
                 edited = False
                 if updater:
-                    edited = await updater.update(chunks[0], force=True)
+                    edited = await updater.update(chunks[0], force=True, reply_markup=None)
                 if not edited:
                     await safe_reply(target_msg, chunks[0])
 

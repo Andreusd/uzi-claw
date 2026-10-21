@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Any
 import httpx
-from telegram import Message
+from telegram import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest, RetryAfter, TimedOut, NetworkError
 
 logger = logging.getLogger(__name__)
@@ -461,6 +461,16 @@ def format_usage_data(usage_data: dict) -> str:
 
 
 
+def get_interrupt_markup() -> InlineKeyboardMarkup:
+    """Return inline keyboard markup with an interrupt button."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏹️ Interromper Tarefa", callback_data="interrupt_task")]
+    ])
+
+
+_KEEP_MARKUP = object()
+
+
 class RateLimitedMessageUpdater:
     """Helper to update a Telegram status message without exceeding rate limits."""
 
@@ -472,18 +482,31 @@ class RateLimitedMessageUpdater:
         self.last_text = message.text or ""
         self._lock = asyncio.Lock()
 
-    async def update(self, text: str, force: bool = False, parse_mode: Optional[str] = "HTML") -> bool:
+    async def update(
+        self,
+        text: str,
+        force: bool = False,
+        parse_mode: Optional[str] = "HTML",
+        reply_markup: Any = _KEEP_MARKUP,
+    ) -> bool:
         """Update the message text if interval passed or force is True."""
-        if not text or text == self.last_text:
+        if not text:
+            return False
+
+        markup_changed = (reply_markup is not _KEEP_MARKUP and reply_markup != self.reply_markup)
+        if reply_markup is not _KEEP_MARKUP:
+            self.reply_markup = reply_markup
+
+        if not markup_changed and text == self.last_text:
             return False
 
         now = time.time()
-        if not force and (now - self.last_update_time < self.min_interval):
+        if not force and not markup_changed and (now - self.last_update_time < self.min_interval):
             return False
 
         async with self._lock:
             # Recheck inside lock
-            if not force and (time.time() - self.last_update_time < self.min_interval):
+            if not force and not markup_changed and (time.time() - self.last_update_time < self.min_interval):
                 return False
 
             try:
