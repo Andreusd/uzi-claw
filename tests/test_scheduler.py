@@ -194,12 +194,10 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
         mock_session.mode = None
         mock_session.model = None
         mock_session.effort = None
-        mock_session.runner.run = AsyncMock()
-
-        mock_isolated_runner = MagicMock()
-        mock_isolated_runner.run = AsyncMock(return_value={"status": "SUCCESS", "response": "Torrent added"})
-        mock_isolated_runner.is_running = False
-        service.create_runner = MagicMock(return_value=mock_isolated_runner)
+        mock_session.background_runners = []
+        mock_session.runner = MagicMock()
+        mock_session.runner.run = AsyncMock(return_value={"status": "SUCCESS", "response": "Torrent added"})
+        mock_session.runner.is_running = False
 
         mock_session_manager = MagicMock()
         mock_session_manager.get_session.return_value = mock_session
@@ -209,9 +207,8 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
 
         await service.execute_job(job)
 
-        # Isolated runner was used, session.runner was NEVER touched
-        mock_isolated_runner.run.assert_called_once()
-        mock_session.runner.run.assert_not_called()
+        # Scheduled task executes via session.runner like a normal conversation turn
+        mock_session.runner.run.assert_called_once()
 
         # Verify initial status message was sent with parse_mode='HTML'
         mock_bot.send_message.assert_called_once()
@@ -247,16 +244,13 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
         mock_session.mode = None
         mock_session.model = None
         mock_session.effort = None
-        mock_session.runner.run = AsyncMock()
-
-        mock_isolated_runner = MagicMock()
-        # Response with characters that would crash raw Telegram Markdown
-        mock_isolated_runner.run = AsyncMock(return_value={
+        mock_session.background_runners = []
+        mock_session.runner = MagicMock()
+        mock_session.runner.run = AsyncMock(return_value={
             "status": "SUCCESS",
             "response": "Downloaded file: `dexter_s01e01_1080p.mkv` in /path_with_underscores/.\n**Result**: Done!",
         })
-        mock_isolated_runner.is_running = False
-        service.create_runner = MagicMock(return_value=mock_isolated_runner)
+        mock_session.runner.is_running = False
 
         mock_session_manager = MagicMock()
         mock_session_manager.get_session.return_value = mock_session
@@ -266,8 +260,7 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
 
         await service.execute_job(job)
 
-        mock_isolated_runner.run.assert_called_once()
-        mock_session.runner.run.assert_not_called()
+        mock_session.runner.run.assert_called_once()
 
         mock_status_msg.edit_text.assert_called_once()
         edit_kwargs = mock_status_msg.edit_text.call_args[1]
@@ -325,11 +318,9 @@ class TestBotScheduleHandlers(unittest.IsolatedAsyncioTestCase):
         mock_session.model = None
         mock_session.effort = None
         mock_session.background_runners = []
-
-        mock_isolated_runner = MagicMock()
-        mock_isolated_runner.run = AsyncMock(return_value={"status": "SUCCESS", "response": "Downloaded"})
-        mock_isolated_runner.is_running = False
-        service.create_runner = MagicMock(return_value=mock_isolated_runner)
+        mock_session.runner = MagicMock()
+        mock_session.runner.run = AsyncMock(return_value={"status": "SUCCESS", "response": "Downloaded"})
+        mock_session.runner.is_running = False
 
         mock_session_manager = MagicMock()
         mock_session_manager.get_session.return_value = mock_session

@@ -414,9 +414,15 @@ class SchedulerService:
 
     async def cancel_running_job(self, schedule_id: int) -> bool:
         """Cancel an in-flight background job runner if currently executing."""
+        thread_info = self._active_job_threads.get(schedule_id)
+        if thread_info and self._session_manager:
+            c_id, t_id = thread_info
+            s = self._session_manager.get_session(c_id, t_id)
+            if s:
+                s.cancel_requested = True
         runner = self._active_runners.get(schedule_id)
         if runner and runner.is_running:
-            logger.info("Cancelling active background runner for schedule #%d", schedule_id)
+            logger.info("Cancelling active runner for schedule #%d", schedule_id)
             res = await runner.cancel()
             self._active_runners.pop(schedule_id, None)
             self._active_job_threads.pop(schedule_id, None)
@@ -560,102 +566,156 @@ class SchedulerService:
         session = self._session_manager.get_session(job.chat_id, target_thread_id) if self._session_manager else None
         tag = "[Manual Trigger]" if is_manual else "[Agendado]"
 
-        # Read environment settings from session without locking or mutating session.runner/is_busy
-        cwd = job.target_cwd or (session.cwd if session else None)
-        mode = session.mode if session else None
-        model = session.model if session else None
-        effort = session.effort if session else None
+        class _DummyLock:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
 
-        job_runner = runner or self.create_runner()
-        self._active_runners[job.id] = job_runner
-        self._active_job_threads[job.id] = (job.chat_id, target_thread_id)
-        if session:
-            session.background_runners.append(job_runner)
-
-        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-        cancel_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"⏹️ Cancelar Tarefa #{job.id}", callback_data=f"sched_cancel_job:{job.id}")]
-        ])
-
-        # Notify Telegram that the scheduled task actually started
-        status_text = f"⏰ *{tag} Tarefa #{job.id} Iniciada:*\n_{job.human_desc or job.prompt}_\n\n⏳ Executando..."
-        status_msg = await safe_send(
-            self._bot,
-            chat_id=job.chat_id,
-            text=status_text,
-            thread_id=target_thread_id,
-            reply_markup=cancel_markup,
-            parse_mode="HTML",
-        )
-
-        # Context injection
-        full_prompt = (
-            f"[Context: Scheduled Task #{job.id} triggered automatically via UziClaw Scheduler. "
-            f"Description: {job.human_desc}. "
-            f"Please execute the requested action and report concise results to the user.]\n\n"
-            f"{job.prompt}"
-        )
-
-        updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5, reply_markup=cancel_markup) if status_msg else None
-        tracker = LiveStatusTracker(
-            updater,
-            header=f"⏰ *{tag} Tarefa #{job.id}:*\n_{job.human_desc or job.prompt}_\n",
-        ) if updater else None
-
-        async def on_event(event_type: str, data: Any) -> None:
-            if tracker:
-                await tracker.on_event(event_type, data)
+        lock_ctx = session.lock if session else _DummyLock()
+        acquired = False
+        my_gen = session.queue_generation if (session and isinstance(getattr(session, "queue_generation", None), int)) else 0
+        if session and isinstance(getattr(session, "queued_count", None), int):
+            session.queued_count += 1
 
         try:
-            # Run using the isolated background runner (zero interference with interactive chat)
-            result = await job_runner.run(
-                prompt=full_prompt,
-                conversation_id=None,
-                cwd=cwd,
-                autopilot=True,
-                mode=mode,
-                model=model,
-                effort=effort,
-                event_callback=on_event,
-            )
+            async with lock_ctx:
+                acquired = True
+                if session:
+                    if isinstance(getattr(session, "queued_count", None), int):
+                        session.queued_count = max(0, session.queued_count - 1)
+                    if isinstance(getattr(session, "queue_generation", None), int) and session.queue_generation != my_gen:
+                        logger.info("Scheduled task #%d dropped because queue was cancelled.", job.id)
+                        return
 
-            response_text = result.get("response", "").strip()
-            status = result.get("status", "SUCCESS")
-            error_msg = result.get("error")
+                    session.is_busy = True
+                    session.cancel_requested = False
+                    try:
+                        from .tray import notify_tray_state_changed
+                        notify_tray_state_changed()
+                    except Exception:
+                        pass
 
-            if status == "SUCCESS":
-                completion_header = f"✅ *[Tarefa #{job.id} Concluída]*\n\n"
-                final_text = completion_header + (response_text or "Operação finalizada com sucesso.")
-            elif status == "CANCELLED":
-                final_text = f"⏹️ *[Tarefa #{job.id}]* Execução cancelada."
-            else:
-                final_text = f"❌ *[Tarefa #{job.id} Falhou]*: {error_msg or 'Erro desconhecido.'}"
+                # Read environment settings from session
+                cwd = job.target_cwd or (session.cwd if session else None)
+                mode = session.mode if session else None
+                model = session.model if session else None
+                effort = session.effort if session else None
 
-            # Send final result
-            chunks = split_message(final_text)
-            if status_msg and chunks:
-                await safe_edit(status_msg, chunks[0], parse_mode="HTML", reply_markup=None)
-                for chunk in chunks[1:]:
-                    await safe_send(self._bot, chat_id=job.chat_id, text=chunk, thread_id=target_thread_id, parse_mode="HTML")
-            else:
-                for chunk in chunks:
-                    await safe_send(self._bot, chat_id=job.chat_id, text=chunk, thread_id=target_thread_id, parse_mode="HTML")
+                job_runner = runner or (session.runner if session else self.create_runner())
+                self._active_runners[job.id] = job_runner
+                self._active_job_threads[job.id] = (job.chat_id, target_thread_id)
+                if session and job_runner is not session.runner:
+                    session.background_runners.append(job_runner)
 
-        except Exception as e:
-            logger.error("Exception during scheduled task execution #%d: %s", job.id, e, exc_info=True)
-            err_text = f"❌ *[Tarefa #{job.id} Erro]*: `{e}`"
-            if status_msg:
-                await safe_edit(status_msg, err_text, parse_mode="HTML", reply_markup=None)
-            else:
-                await safe_send(self._bot, chat_id=job.chat_id, text=err_text, thread_id=target_thread_id, parse_mode="HTML")
-        finally:
-            self._active_runners.pop(job.id, None)
-            self._active_job_threads.pop(job.id, None)
-            if session and job_runner in session.background_runners:
+                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                cancel_markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"⏹️ Cancelar Tarefa #{job.id}", callback_data=f"sched_cancel_job:{job.id}")]
+                ])
+
+                # Notify Telegram that the scheduled task actually started
+                status_text = f"⏰ *{tag} Tarefa #{job.id} Iniciada:*\n_{job.human_desc or job.prompt}_\n\n⏳ Executando..."
+                status_msg = await safe_send(
+                    self._bot,
+                    chat_id=job.chat_id,
+                    text=status_text,
+                    thread_id=target_thread_id,
+                    reply_markup=cancel_markup,
+                    parse_mode="HTML",
+                )
+
+                if session and session.cancel_requested:
+                    session.cancel_requested = False
+                    if status_msg:
+                        await safe_edit(status_msg, f"⏹️ <b>[Tarefa #{job.id}]</b> Cancelada antes de iniciar.", parse_mode="HTML", reply_markup=None)
+                    return
+
+                # Context injection
+                full_prompt = (
+                    f"[Context: Scheduled Task #{job.id} triggered automatically via UziClaw Scheduler. "
+                    f"Description: {job.human_desc}. "
+                    f"Please execute the requested action and report concise results to the user.]\n\n"
+                    f"{job.prompt}"
+                )
+
+                updater = RateLimitedMessageUpdater(status_msg, min_interval=1.5, reply_markup=cancel_markup) if status_msg else None
+                tracker = LiveStatusTracker(
+                    updater,
+                    header=f"⏰ *{tag} Tarefa #{job.id}:*\n_{job.human_desc or job.prompt}_\n",
+                ) if updater else None
+
+                async def on_event(event_type: str, data: Any) -> None:
+                    if tracker:
+                        await tracker.on_event(event_type, data)
+                    if event_type == "init" and session and isinstance(data, dict) and data.get("conversation_id"):
+                        if session.conversation_id != data["conversation_id"]:
+                            session.conversation_id = data["conversation_id"]
+                            self._session_manager.save_session(session)
+
                 try:
-                    session.background_runners.remove(job_runner)
-                except ValueError:
-                    pass
+                    result = await job_runner.run(
+                        prompt=full_prompt,
+                        conversation_id=session.conversation_id if session else None,
+                        cwd=cwd,
+                        autopilot=True,
+                        mode=mode,
+                        model=model,
+                        effort=effort,
+                        event_callback=on_event,
+                    )
+
+                    if session and result.get("conversation_id"):
+                        session.conversation_id = result["conversation_id"]
+                        self._session_manager.save_session(session)
+
+                    response_text = result.get("response", "").strip()
+                    status = result.get("status", "SUCCESS")
+                    error_msg = result.get("error")
+
+                    if status == "SUCCESS":
+                        completion_header = f"✅ *[Tarefa #{job.id} Concluída]*\n\n"
+                        final_text = completion_header + (response_text or "Operação finalizada com sucesso.")
+                    elif status == "CANCELLED":
+                        final_text = f"⏹️ *[Tarefa #{job.id}]* Execução cancelada."
+                    else:
+                        final_text = f"❌ *[Tarefa #{job.id} Falhou]*: {error_msg or 'Erro desconhecido.'}"
+
+                    # Send final result
+                    chunks = split_message(final_text)
+                    if status_msg and chunks:
+                        await safe_edit(status_msg, chunks[0], parse_mode="HTML", reply_markup=None)
+                        for chunk in chunks[1:]:
+                            await safe_send(self._bot, chat_id=job.chat_id, text=chunk, thread_id=target_thread_id, parse_mode="HTML")
+                    else:
+                        for chunk in chunks:
+                            await safe_send(self._bot, chat_id=job.chat_id, text=chunk, thread_id=target_thread_id, parse_mode="HTML")
+
+                except Exception as e:
+                    logger.error("Exception during scheduled task execution #%d: %s", job.id, e, exc_info=True)
+                    err_text = f"❌ *[Tarefa #{job.id} Erro]*: `{e}`"
+                    if status_msg:
+                        await safe_edit(status_msg, err_text, parse_mode="HTML", reply_markup=None)
+                    else:
+                        await safe_send(self._bot, chat_id=job.chat_id, text=err_text, thread_id=target_thread_id, parse_mode="HTML")
+                finally:
+                    self._active_runners.pop(job.id, None)
+                    self._active_job_threads.pop(job.id, None)
+                    if session:
+                        if job_runner in session.background_runners:
+                            try:
+                                session.background_runners.remove(job_runner)
+                            except ValueError:
+                                pass
+                        if job_runner is session.runner:
+                            session.is_busy = False
+                            try:
+                                from .tray import notify_tray_state_changed
+                                notify_tray_state_changed()
+                            except Exception:
+                                pass
+        finally:
+            if not acquired and session and isinstance(getattr(session, "queued_count", None), int):
+                session.queued_count = max(0, session.queued_count - 1)
 
 
 scheduler_service = SchedulerService()
