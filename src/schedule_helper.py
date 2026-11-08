@@ -106,6 +106,56 @@ def cmd_cancel(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_edit(args: argparse.Namespace) -> int:
+    try:
+        success = schedule_store.update_schedule(
+            schedule_id=args.id,
+            prompt=args.prompt,
+            human_desc=args.desc,
+            expression=args.expr,
+            schedule_type=args.type,
+            target_cwd=args.cwd,
+            forum_topic_id=getattr(args, "topic_id", None),
+            chat_id=args.chat_id,
+        )
+        if success:
+            sched = schedule_store.get_schedule(args.id)
+            out = {
+                "status": "success",
+                "message": f"Agendamento #{args.id} atualizado.",
+                "schedule": {
+                    "id": sched.id,
+                    "human_desc": sched.human_desc,
+                    "prompt": sched.prompt,
+                    "expression": sched.expression,
+                    "next_run": format_timestamp(sched.next_run),
+                } if sched else None,
+            }
+            if args.json:
+                print(json.dumps(out, ensure_ascii=False, indent=2))
+            else:
+                print(f"✅ Agendamento #{args.id} atualizado com sucesso!")
+                if sched:
+                    print(f"📌 Descrição: {sched.human_desc}")
+                    print(f"⏰ Próxima execução: {format_timestamp(sched.next_run)}")
+                    print(f"📝 Prompt: {sched.prompt}")
+            return 0
+        else:
+            out = {"status": "error", "message": f"Agendamento #{args.id} não encontrado ou nenhuma alteração fornecida."}
+            if args.json:
+                print(json.dumps(out))
+            else:
+                print(f"❌ Agendamento #{args.id} não encontrado ou nenhuma alteração fornecida.", file=sys.stderr)
+            return 1
+    except Exception as e:
+        err = {"status": "error", "message": str(e)}
+        if args.json:
+            print(json.dumps(err, ensure_ascii=False))
+        else:
+            print(f"❌ Erro ao atualizar agendamento: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_delete(args: argparse.Namespace) -> int:
     success = schedule_store.delete_schedule(args.id, chat_id=args.chat_id)
     if success:
@@ -156,12 +206,26 @@ def main() -> None:
     p_delete.add_argument("--id", type=int, required=True, help="Schedule ID")
     p_delete.add_argument("--chat-id", type=int, default=None, help="Validate Chat ID")
 
+    # EDIT / UPDATE
+    for cmd_name in ("edit", "update"):
+        p_edit = subparsers.add_parser(cmd_name, parents=[common_parent], help="Edit/update an existing schedule")
+        p_edit.add_argument("--id", type=int, required=True, help="Schedule ID to edit")
+        p_edit.add_argument("--chat-id", type=int, default=None, help="Validate Chat ID")
+        p_edit.add_argument("--prompt", type=str, default=None, help="New prompt/task to execute")
+        p_edit.add_argument("--type", choices=["cron", "once"], default=None, help="New schedule type")
+        p_edit.add_argument("--expr", type=str, default=None, help="New cron expression or offset")
+        p_edit.add_argument("--desc", type=str, default=None, help="New human friendly description")
+        p_edit.add_argument("--cwd", type=str, default=None, help="New target working directory")
+        p_edit.add_argument("--topic-id", "--thread-id", dest="topic_id", type=int, default=None, help="New target forum topic / thread ID")
+
     args = parser.parse_args()
 
     if args.command == "add":
         sys.exit(cmd_add(args))
     elif args.command == "list":
         sys.exit(cmd_list(args))
+    elif args.command in ("edit", "update"):
+        sys.exit(cmd_edit(args))
     elif args.command == "cancel":
         sys.exit(cmd_cancel(args))
     elif args.command == "delete":

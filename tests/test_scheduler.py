@@ -91,6 +91,33 @@ class TestScheduleStore(unittest.TestCase):
         self.assertEqual(len(active_after), 1)
         self.assertEqual(active_after[0].id, 2)
 
+    def test_update_schedule(self):
+        sched = self.store.add_schedule(
+            chat_id=101,
+            prompt="Prompt inicial",
+            schedule_type="cron",
+            expression="0 20 * * 2",
+            human_desc="Desc inicial",
+        )
+        self.assertEqual(sched.prompt, "Prompt inicial")
+
+        # Update prompt and human_desc
+        ok = self.store.update_schedule(sched.id, prompt="Novo prompt", human_desc="Nova desc")
+        self.assertTrue(ok)
+
+        updated = self.store.get_schedule(sched.id)
+        self.assertEqual(updated.prompt, "Novo prompt")
+        self.assertEqual(updated.human_desc, "Nova desc")
+        self.assertEqual(updated.expression, "0 20 * * 2")
+
+        # Update expression recomputes next_run
+        old_next_run = updated.next_run
+        ok_expr = self.store.update_schedule(sched.id, expression="0 22 * * 3")
+        self.assertTrue(ok_expr)
+        updated2 = self.store.get_schedule(sched.id)
+        self.assertEqual(updated2.expression, "0 22 * * 3")
+        self.assertNotEqual(updated2.next_run, old_next_run)
+
     def test_get_due_schedules(self):
         now = time.time()
         # Schedule in past

@@ -206,6 +206,12 @@ class TestBotComponents(unittest.TestCase):
         self.assertIn("[Context: You are UziClaw", res1)
         self.assertIn("@TestUser", res1)
         self.assertIn("Check status", res1)
+        self.assertIn("src.media_helper send", res1)
+
+        # Test with thread_id / topic_id
+        res_thread = build_prompt_with_context("Check status", user=user_with_username, chat_id=12345, thread_id=999)
+        self.assertIn("--thread-id 999", res_thread)
+        self.assertIn("--chat-id 12345", res_thread)
 
         user_no_username = DummyUser(12345, username=None, full_name="Alice")
         user_no_username.first_name = "Alice"

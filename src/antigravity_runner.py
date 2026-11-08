@@ -32,24 +32,31 @@ class AntigravityRunner:
         if not self.is_running or self._current_process is None:
             return False
 
+        proc = self._current_process
+        if proc is None or not self.is_running:
+            return False
+
         self._is_cancelled = True
-        logger.info("Attempting to interrupt running agy process PID %d", self._current_process.pid)
+        logger.info("Attempting to interrupt running agy process PID %d", proc.pid)
         try:
             if sys.platform == "win32":
                 try:
-                    self._current_process.send_signal(signal.CTRL_BREAK_EVENT)
+                    proc.send_signal(signal.CTRL_BREAK_EVENT)
                 except Exception:
-                    self._current_process.terminate()
+                    proc.terminate()
             else:
-                self._current_process.send_signal(signal.SIGINT)
+                proc.send_signal(signal.SIGINT)
             for _ in range(6):
-                if self._current_process.returncode is not None:
+                if proc.returncode is not None or self._current_process is None:
                     break
                 await asyncio.sleep(0.5)
 
-            if self._current_process.returncode is None:
-                logger.warning("Force terminating agy process PID %d after interrupt timeout", self._current_process.pid)
-                self._current_process.terminate()
+            if proc.returncode is None:
+                logger.warning("Force terminating agy process PID %d after interrupt timeout", proc.pid)
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
             return True
         except ProcessLookupError:
             return True
@@ -59,22 +66,28 @@ class AntigravityRunner:
 
     async def cancel(self) -> bool:
         """Cancel the active subprocess if running."""
-        if not self.is_running or self._current_process is None:
+        proc = self._current_process
+        if proc is None or not self.is_running:
             return False
 
         self._is_cancelled = True
-        logger.info("Attempting to terminate running agy process PID %d", self._current_process.pid)
+        logger.info("Attempting to terminate running agy process PID %d", proc.pid)
         try:
-            self._current_process.terminate()
+            proc.terminate()
             # Wait up to 3 seconds for graceful shutdown
             for _ in range(6):
-                if self._current_process.returncode is not None:
+                if proc.returncode is not None or self._current_process is None:
                     break
                 await asyncio.sleep(0.5)
 
-            if self._current_process.returncode is None:
-                logger.warning("Force killing agy process PID %d", self._current_process.pid)
-                self._current_process.kill()
+            if proc.returncode is None:
+                logger.warning("Force killing agy process PID %d", proc.pid)
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            return True
+        except ProcessLookupError:
             return True
         except Exception as e:
             logger.error("Error terminating agy process: %s", e)

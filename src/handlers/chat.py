@@ -23,6 +23,7 @@ from ..formatters import (
 )
 from ..tray import notify_tray_state_changed
 from ..media_manager import download_telegram_file_with_retry
+from ..media_helper import dispatch_media_tags
 from .commands import get_session_from_update
 from .forum_helper import (
     is_forum_general_chat,
@@ -53,7 +54,13 @@ def _is_context_injection_enabled() -> bool:
     return INJECT_TELEGRAM_CONTEXT
 
 
-def build_prompt_with_context(prompt_text: str, user=None, is_first_turn: bool = True, chat_id: Optional[int] = None) -> str:
+def build_prompt_with_context(
+    prompt_text: str,
+    user=None,
+    is_first_turn: bool = True,
+    chat_id: Optional[int] = None,
+    thread_id: Optional[int] = None,
+) -> str:
     """Optionally inject context so the CLI agent knows the prompt is coming from Telegram (first turn only)."""
     if not _is_context_injection_enabled() or not is_first_turn:
         return prompt_text
@@ -65,11 +72,17 @@ def build_prompt_with_context(prompt_text: str, user=None, is_first_turn: bool =
         f"'python -m src.schedule_helper add --chat-id {target_chat} --type <cron|once> --expr <cron_expression_or_offset> --desc <description> --prompt <task_prompt>'."
         if target_chat else ""
     )
+    thread_arg = f" --thread-id {thread_id}" if thread_id else ""
+    media_hint = (
+        f" When you generate, build, or want to send a file, APK, photo, or document to the user in this chat, execute: "
+        f"'python -m src.media_helper send --chat-id {target_chat}{thread_arg} --file <path> --caption <optional_caption>'."
+        if target_chat else ""
+    )
     context_prefix = (
         f"[Context: You are UziClaw, an autonomous personal AI assistant powered by Antigravity, "
         f"running locally on the user's Linux machine and communicating via Telegram with {user_identifier}. "
         f"Keep responses clear, concise, and mobile-friendly where appropriate. "
-        f"Avoid expecting interactive terminal input.{schedule_hint}]\n\n"
+        f"Avoid expecting interactive terminal input.{schedule_hint}{media_hint}]\n\n"
     )
     return f"{context_prefix}{prompt_text}"
 
@@ -341,6 +354,7 @@ async def _handle_general_forum_message(
                     user=update.effective_user,
                     is_first_turn=True,
                     chat_id=chat.id,
+                    thread_id=target_thread_id,
                 )
                 result = await session.runner.run(
                     prompt=full_prompt,
@@ -364,6 +378,13 @@ async def _handle_general_forum_message(
 
                 if status == "CANCELLED":
                     cancel_text = response_text or "⏹️ Execução cancelada ou interrompida."
+                    if cancel_text and ("send_file:" in cancel_text or "attach:" in cancel_text):
+                        cancel_text, _ = await dispatch_media_tags(
+                            response_text=cancel_text,
+                            bot=context.bot,
+                            chat_id=chat.id,
+                            thread_id=target_thread_id,
+                        )
                     if updater:
                         await updater.update(cancel_text, force=True, reply_markup=None)
                     else:
@@ -384,6 +405,14 @@ async def _handle_general_forum_message(
                     else:
                         await safe_send(context.bot, chat.id, "⚠️ Turn completed with empty output.", thread_id=target_thread_id)
                     return
+
+                # Auto-detect and dispatch media tags [send_file: ...] or [attach: ...]
+                response_text, _ = await dispatch_media_tags(
+                    response_text=response_text,
+                    bot=context.bot,
+                    chat_id=chat.id,
+                    thread_id=target_thread_id,
+                )
 
                 chunks = split_message(response_text)
                 edited = False
@@ -659,11 +688,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 # Run the prompt with injected Telegram context if enabled (first turn only)
                 is_first_turn = session.conversation_id is None
+                raw_thread_id = getattr(target_msg, "message_thread_id", None)
+                thread_id = raw_thread_id if isinstance(raw_thread_id, int) else None
                 full_prompt = build_prompt_with_context(
                     prompt_text,
                     user=update.effective_user,
                     is_first_turn=is_first_turn,
                     chat_id=update.effective_chat.id,
+                    thread_id=thread_id,
                 )
                 result = await session.runner.run(
                     prompt=full_prompt,
@@ -688,6 +720,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 if status == "CANCELLED":
                     cancel_text = response_text or "⏹️ Execução cancelada ou interrompida."
+                    if cancel_text and ("send_file:" in cancel_text or "attach:" in cancel_text):
+                        cancel_text, _ = await dispatch_media_tags(
+                            response_text=cancel_text,
+                            bot=context.bot,
+                            chat_id=update.effective_chat.id,
+                            thread_id=thread_id,
+                        )
                     if updater:
                         await updater.update(cancel_text, force=True, reply_markup=None)
                     else:
@@ -709,6 +748,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     else:
                         await safe_reply(target_msg, empty_msg)
                     return
+
+                # Auto-detect and dispatch media tags [send_file: ...] or [attach: ...]
+                response_text, _ = await dispatch_media_tags(
+                    response_text=response_text,
+                    bot=context.bot,
+                    chat_id=update.effective_chat.id,
+                    thread_id=thread_id,
+                )
 
                 # Response is available: chunk it and send
                 chunks = split_message(response_text)

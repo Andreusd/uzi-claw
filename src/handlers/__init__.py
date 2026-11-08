@@ -51,6 +51,11 @@ from .forum_helper import (
     unpin_topic_messages_quietly,
     FORUM_TOPIC_ICONS,
 )
+from ..media_helper import (
+    send_media,
+    parse_media_tags,
+    dispatch_media_tags,
+)
 
 __all__ = [
     "get_session_from_update",
@@ -96,4 +101,7 @@ __all__ = [
     "edit_forum_topic_with_retry",
     "unpin_topic_messages_quietly",
     "FORUM_TOPIC_ICONS",
+    "send_media",
+    "parse_media_tags",
+    "dispatch_media_tags",
 ]

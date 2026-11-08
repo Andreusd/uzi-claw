@@ -12,7 +12,7 @@ from telegram.ext import CommandHandler, ContextTypes
 from ..config import AGY_BIN_PATH, FORUM_GROUP_ID, PROJECT_ROOT
 from ..auth import restricted
 from ..session_manager import session_manager, SessionState
-from ..formatters import safe_reply, safe_send, safe_edit, format_usage_data
+from ..formatters import safe_reply, safe_send, safe_edit, format_usage_data, split_message
 from ..antigravity_runner import get_usage
 from ..device_stats import format_device_stats
 from ..scheduler import scheduler_service
@@ -675,14 +675,11 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         history_messages.append(history_header)
         for i, turn in enumerate(turns, 1):
             u_text = turn["user"]
-            if len(u_text) > 500:
-                u_text = u_text[:497] + "..."
             a_text = turn["assistant"]
-            if len(a_text) > 1400:
-                a_text = a_text[:1397] + "...\n_(resposta truncada para exibição)_"
             tools_line = f"\n_🔧 Ferramentas: {', '.join(turn['tools'])}_" if turn.get("tools") else ""
             block = f"👤 **Você:**\n{u_text}\n\n🤖 **Antigravity:**\n{a_text}{tools_line}"
-            history_messages.append(block)
+            for piece in split_message(block):
+                history_messages.append(piece)
 
     # Send messages based on origin
     if is_general:

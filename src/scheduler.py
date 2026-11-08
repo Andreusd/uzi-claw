@@ -316,6 +316,62 @@ class ScheduleStore:
                 (forum_topic_id, schedule_id),
             )
 
+    def update_schedule(
+        self,
+        schedule_id: int,
+        prompt: Optional[str] = None,
+        human_desc: Optional[str] = None,
+        expression: Optional[str] = None,
+        schedule_type: Optional[str] = None,
+        target_cwd: Optional[str] = None,
+        forum_topic_id: Optional[int] = None,
+        chat_id: Optional[int] = None,
+    ) -> bool:
+        """Update mutable fields of an existing schedule."""
+        fields: List[str] = []
+        params: List[Any] = []
+        if prompt is not None:
+            fields.append("prompt = ?")
+            params.append(prompt)
+        if human_desc is not None:
+            fields.append("human_desc = ?")
+            params.append(human_desc)
+        if expression is not None:
+            fields.append("expression = ?")
+            params.append(expression)
+        if schedule_type is not None:
+            fields.append("schedule_type = ?")
+            params.append(schedule_type)
+        if target_cwd is not None:
+            fields.append("target_cwd = ?")
+            params.append(target_cwd)
+        if forum_topic_id is not None:
+            fields.append("forum_topic_id = ?")
+            params.append(forum_topic_id)
+
+        if not fields:
+            return False
+
+        if expression is not None or schedule_type is not None:
+            sched = self.get_schedule(schedule_id)
+            if sched:
+                s_type = schedule_type or sched.schedule_type
+                expr = expression or sched.expression
+                next_run = compute_next_run(s_type, expr)
+                fields.append("next_run = ?")
+                params.append(next_run)
+
+        query = f"UPDATE schedules SET {', '.join(fields)} WHERE id = ?"
+        params.append(schedule_id)
+        if chat_id is not None:
+            query += " AND chat_id = ?"
+            params.append(chat_id)
+
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return cursor.rowcount > 0
+
     def cancel_schedule(self, schedule_id: int, chat_id: Optional[int] = None) -> bool:
         """Mark schedule as cancelled."""
         query = "UPDATE schedules SET status = 'cancelled' WHERE id = ?"

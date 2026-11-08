@@ -71,6 +71,9 @@ from .handlers import (
     cmd_terminal,
     execute_terminal_command,
     handle_message,
+    send_media,
+    parse_media_tags,
+    dispatch_media_tags,
 )
 
 logger = logging.getLogger(__name__)
@@ -258,6 +261,9 @@ __all__ = [
     "cmd_terminal",
     "execute_terminal_command",
     "handle_message",
+    "send_media",
+    "parse_media_tags",
+    "dispatch_media_tags",
     "schedule_store",
     "scheduler_service",
     "format_timestamp",
